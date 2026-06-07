@@ -703,7 +703,7 @@ class Service:
             order_id, buyer_tg_id, price_usd, self.cfg.residential_currency,
             purpose="order", meta=meta,
         )
-        ipn_url = self.cfg.public_base_url + "/nowpayments/ipn"
+        ipn_url = self.cfg.ipn_callback_url(self.server_ip)
         try:
             inv = await self.nowpayments.create_invoice(
                 price_amount=price_usd,
@@ -776,7 +776,7 @@ class Service:
         order_id = f"{self.cfg.brand_name}-{tg_id}-{secrets.token_hex(5)}"
         # مبلغ ذخیره‌شده همان تومانی است که به کیف پول اضافه می‌شود
         self.db.create_payment(order_id, tg_id, amount, self.cfg.wallet_currency)
-        ipn_url = self.cfg.public_base_url + "/nowpayments/ipn"
+        ipn_url = self.cfg.ipn_callback_url(self.server_ip)
         try:
             inv = await self.nowpayments.create_invoice(
                 price_amount=usd_amount,

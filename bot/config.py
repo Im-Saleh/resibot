@@ -90,10 +90,8 @@ class Settings:
     smartproxy_life: int = field(default_factory=lambda: _get_int("SMARTPROXY_LIFE", 120))
 
     # فالبک‌های اختیاری وقتی /panel/setting/all در دسترس نیست
-    # مسیر فایل گواهی/کلید پنل (همان مقادیر "Set as panel")
     panel_cert_file: str = field(default_factory=lambda: _get("PANEL_CERT_FILE"))
     panel_key_file: str = field(default_factory=lambda: _get("PANEL_KEY_FILE"))
-    # تنظیمات سرور اشتراک (subscription) برای ساخت لینک ساب
     sub_port: int = field(default_factory=lambda: _get_int("SUB_PORT", 2096))
     sub_path: str = field(default_factory=lambda: _get("SUB_PATH", "/sub/"))
     sub_secure: bool = field(default_factory=lambda: _get_bool("SUB_SECURE", True))
@@ -107,35 +105,30 @@ class Settings:
     renew_min_volume_gb: int = field(default_factory=lambda: _get_int("RENEW_MIN_VOLUME_GB", 5))
     config_duration_days: int = field(default_factory=lambda: _get_int("CONFIG_DURATION_DAYS", 30))
 
-    # قیمت‌ها (به ازای هر گیگابایت) — واحد در WALLET_CURRENCY
-    # رزیدنتال: قیمت عادی (مشتری) و قیمت همکار (ارزان‌تر)
+    # قیمت‌ها (به ازای هر گیگابایت)
+    # رزیدنتال: واحد دلار | V2Ray عادی: واحد تومان
     price_per_gb: float = field(default_factory=lambda: _get_float("PRICE_PER_GB", 2.9))
     reseller_price_per_gb: float = field(default_factory=lambda: _get_float("RESELLER_PRICE_PER_GB", 2.0))
-    # v2ray (پنل بعداً اضافه می‌شود؛ فعلاً جای‌گذاری)
-    v2ray_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_PRICE_PER_GB", 1.5))
-    v2ray_reseller_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_RESELLER_PRICE_PER_GB", 1.0))
+    v2ray_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_PRICE_PER_GB", 50000.0))
+    v2ray_reseller_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_RESELLER_PRICE_PER_GB", 35000.0))
 
     # حداقل موجودی لازم برای همکار v2ray (پیش‌پرداخت)
     reseller_min_balance: float = field(default_factory=lambda: _get_float("RESELLER_MIN_BALANCE", 5000000.0))
 
     # کیف پول و پرداخت
     wallet_currency: str = field(default_factory=lambda: _get("WALLET_CURRENCY", "تومان"))
-    # واحد قیمت رزیدنتال (دلار)
     residential_currency: str = field(default_factory=lambda: _get("RESIDENTIAL_CURRENCY", "USD"))
-    # نرخ تبدیل تومان به دلار/تتر (قابل ویرایش در ربات)
     toman_per_usd: float = field(default_factory=lambda: _get_float("TOMAN_PER_USD", 175000.0))
     nowpayments_api_key: str = field(default_factory=lambda: _get("NOWPAYMENTS_API_KEY"))
     nowpayments_ipn_secret: str = field(default_factory=lambda: _get("NOWPAYMENTS_IPN_SECRET"))
     nowpayments_public_key: str = field(default_factory=lambda: _get("NOWPAYMENTS_PUBLIC_KEY"))
-    # ارز قیمت‌گذاری در NowPayments (فیات؛ مثل usd)
     nowpayments_price_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PRICE_CURRENCY", "usd"))
-    # ارز پرداخت پیش‌فرض (USDT روی ترون = usdttrc20)
     nowpayments_pay_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PAY_CURRENCY", "usdttrc20"))
-    # آدرس عمومی برای دریافت IPN (مثل https://example.com یا https://ip:port)
+    # آدرس عمومی برای IPN؛ اگر خالی باشد خودکار از IP سرور ساخته می‌شود.
     public_base_url: str = field(default_factory=lambda: _get("PUBLIC_BASE_URL").rstrip("/"))
     ipn_host: str = field(default_factory=lambda: _get("IPN_HOST", "0.0.0.0"))
     ipn_port: int = field(default_factory=lambda: _get_int("IPN_PORT", 8090))
-    # برای سرو IPN روی HTTPS (NowPayments آدرس https می‌خواهد)؛ همان گواهی پنل قابل استفاده است.
+    # اختیاری: برای سرو IPN روی HTTPS (در غیر این صورت HTTP استفاده می‌شود).
     ipn_cert_file: str = field(default_factory=lambda: _get("IPN_CERT_FILE"))
     ipn_key_file: str = field(default_factory=lambda: _get("IPN_KEY_FILE"))
 
@@ -144,7 +137,22 @@ class Settings:
 
     @property
     def nowpayments_enabled(self) -> bool:
-        return bool(self.nowpayments_api_key and self.nowpayments_ipn_secret and self.public_base_url)
+        # فقط دو کلید لازم است؛ آدرس IPN خودکار ساخته می‌شود.
+        return bool(self.nowpayments_api_key and self.nowpayments_ipn_secret)
+
+    def ipn_callback_url(self, server_ip: str = "") -> str:
+        """آدرس callback برای NowPayments.
+
+        اگر PUBLIC_BASE_URL ست شده باشد از همان استفاده می‌شود؛ در غیر این صورت
+        خودکار از IP/دامنه‌ی سرور روی پورت IPN ساخته می‌شود (http یا https بسته
+        به وجود گواهی).
+        """
+        base = self.public_base_url
+        if not base:
+            scheme = "https" if (self.ipn_cert_file and self.ipn_key_file) else "http"
+            host = server_ip or self.server_ip
+            base = f"{scheme}://{host}:{self.ipn_port}"
+        return base.rstrip("/") + "/nowpayments/ipn"
 
     def db_full_path(self) -> Path:
         p = Path(self.db_path)
