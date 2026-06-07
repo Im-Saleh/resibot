@@ -138,6 +138,9 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask NOWPAYMENTS_PRICE_CURRENCY "ارز قیمت‌گذاری درگاه (مثل usd)" "usd"
   ask PUBLIC_BASE_URL "آدرس عمومی برای IPN (مثل https://دامنه:8090)"
   ask IPN_PORT "پورت سرور IPN" "8090"
+  echo "برای HTTPS روی سرور IPN می‌توانید گواهی پنل را بدهید (اختیاری ولی توصیه‌شده):"
+  ask IPN_CERT_FILE "مسیر فایل گواهی (fullchain.pem) - اختیاری" ""
+  ask IPN_KEY_FILE "مسیر فایل کلید (privkey.pem) - اختیاری" ""
 
   bold "==> نوشتن فایل .env"
   cat > "$ENV_FILE" <<EOF
@@ -195,6 +198,8 @@ NOWPAYMENTS_PAY_CURRENCY=usdttrc20
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 IPN_HOST=0.0.0.0
 IPN_PORT=${IPN_PORT}
+IPN_CERT_FILE=${IPN_CERT_FILE}
+IPN_KEY_FILE=${IPN_KEY_FILE}
 
 DB_PATH=data/resibot.db
 EOF

@@ -105,7 +105,14 @@ async def start_ipn_server(cfg: Settings, db: Database, bot: Any, service: Any =
     app = make_ipn_app(cfg, db, bot, service)
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, cfg.ipn_host, cfg.ipn_port)
+    ssl_context = None
+    if cfg.ipn_cert_file and cfg.ipn_key_file:
+        import ssl
+        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+        ssl_context.load_cert_chain(cfg.ipn_cert_file, cfg.ipn_key_file)
+        logger.info("IPN روی HTTPS سرو می‌شود")
+    site = web.TCPSite(runner, cfg.ipn_host, cfg.ipn_port, ssl_context=ssl_context)
     await site.start()
-    logger.info("IPN server روی %s:%s بالا آمد", cfg.ipn_host, cfg.ipn_port)
+    scheme = "https" if ssl_context else "http"
+    logger.info("IPN server روی %s://%s:%s بالا آمد", scheme, cfg.ipn_host, cfg.ipn_port)
     return runner

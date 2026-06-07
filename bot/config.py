@@ -135,6 +135,9 @@ class Settings:
     public_base_url: str = field(default_factory=lambda: _get("PUBLIC_BASE_URL").rstrip("/"))
     ipn_host: str = field(default_factory=lambda: _get("IPN_HOST", "0.0.0.0"))
     ipn_port: int = field(default_factory=lambda: _get_int("IPN_PORT", 8090))
+    # برای سرو IPN روی HTTPS (NowPayments آدرس https می‌خواهد)؛ همان گواهی پنل قابل استفاده است.
+    ipn_cert_file: str = field(default_factory=lambda: _get("IPN_CERT_FILE"))
+    ipn_key_file: str = field(default_factory=lambda: _get("IPN_KEY_FILE"))
 
     # دیتابیس
     db_path: str = field(default_factory=lambda: _get("DB_PATH", "data/resibot.db"))
