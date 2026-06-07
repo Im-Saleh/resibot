@@ -217,9 +217,9 @@ def test_price_tiers():
 def test_payer_for():
     assert Service._payer_for(ROLE_ADMIN, PRODUCT_RESIDENTIAL) == "admin"
     assert Service._payer_for(ROLE_RESIDENTIAL_RESELLER, PRODUCT_RESIDENTIAL) == "postpaid"
-    # رزیدنتال برای غیرهمکار مجاز نیست
-    assert Service._payer_for(ROLE_USER, PRODUCT_RESIDENTIAL) == "denied"
-    assert Service._payer_for(ROLE_V2RAY_RESELLER, PRODUCT_RESIDENTIAL) == "denied"
+    # رزیدنتال برای کاربر عادی → پرداخت آنلاین
+    assert Service._payer_for(ROLE_USER, PRODUCT_RESIDENTIAL) == "nowpayments"
+    assert Service._payer_for(ROLE_V2RAY_RESELLER, PRODUCT_RESIDENTIAL) == "nowpayments"
     # V2Ray از کیف پول
     assert Service._payer_for(ROLE_USER, PRODUCT_V2RAY) == "wallet"
     assert Service._payer_for(ROLE_V2RAY_RESELLER, PRODUCT_V2RAY) == "wallet"

@@ -6,7 +6,12 @@ import logging
 from aiogram import F, Router
 from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
 
 from .. import countries, locations
 from ..config import Settings
@@ -36,15 +41,7 @@ router = Router(name="order")
 #  شروع سفارش از منوی محصولات
 # ---------------------------------------------------------------------- #
 @router.callback_query(F.data == "buy:residential")
-async def buy_residential(call: CallbackQuery, state: FSMContext, role: str, is_admin: bool) -> None:
-    if not (is_admin or role == ROLE_RESIDENTIAL_RESELLER):
-        await call.answer()
-        await call.message.answer(
-            "🌐 <b>کانفیگ رزیدنتال</b>\n\n"
-            "این محصول فقط برای <b>همکاران رزیدنتال</b> در دسترس است.\n"
-            "برای دریافت دسترسی با ادمین هماهنگ کنید."
-        )
-        return
+async def buy_residential(call: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(OrderStates.choosing_country)
     await state.update_data(product=PRODUCT_RESIDENTIAL)
@@ -253,6 +250,8 @@ async def order_volume(message: Message, state: FSMContext, service: Service, ro
         pay_line = "💳 پرداخت: <b>پس‌پرداخت</b> (تسویه با ادمین)"
     elif payer == "admin":
         pay_line = "💳 پرداخت: <b>رایگان (ادمین)</b>"
+    elif payer == "nowpayments":
+        pay_line = "💳 پرداخت: <b>آنلاین (USDT/TRC20)</b> — پس از پرداخت، سرویس خودکار ساخته می‌شود"
     else:
         bal = service.db.get_balance(message.from_user.id)
         pay_line = f"💳 پرداخت: از کیف پول | موجودی شما: <b>{bal:g} {service.currency}</b>"
@@ -293,22 +292,38 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
         city=data.get("city", ""),
     )
     life = data.get("life", None)
+    payer = service._payer_for(role, product)
 
+    # کاربر عادی غیرهمکار: پرداخت آنلاین (اول پرداخت، بعد ساخت خودکار)
+    if payer == "nowpayments":
+        if not cfg.nowpayments_enabled:
+            await call.message.answer("⛔️ درگاه پرداخت فعال نیست. با ادمین هماهنگ کنید.")
+            return
+        wait = await call.message.answer("⏳ در حال ساخت لینک پرداخت...")
+        try:
+            info = await service.create_residential_order(call.from_user.id, location, volume, life)
+        except ValueError as exc:
+            await wait.edit_text(f"⛔️ {exc}")
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("create order failed")
+            await wait.edit_text(f"❌ خطا در ساخت لینک پرداخت:\n<code>{exc}</code>")
+            return
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="💳 پرداخت با USDT (TRC20)", url=info["invoice_url"])]]
+        )
+        await wait.edit_text(
+            f"🧾 فاکتور سرویس رزیدنتال <b>{volume} GB</b> ساخته شد.\n"
+            f"≈ <b>{info['usd_amount']:g} USDT</b> (شبکه ترون / TRC20)\n\n"
+            "پس از پرداخت، سرویس به‌صورت خودکار ساخته و لینک‌ها برایتان ارسال می‌شود.",
+            reply_markup=kb,
+        )
+        return
+
+    # ادمین (رایگان) یا همکار رزیدنتال (پس‌پرداخت): ساخت فوری
     wait = await call.message.answer("⏳ در حال ساخت سرویس... لطفاً چند لحظه صبر کنید.")
     try:
         result = await service.purchase_residential(call.from_user.id, role, location, volume, life)
-    except InsufficientBalance as exc:
-        await wait.edit_text(
-            f"⛔️ موجودی کیف پول کافی نیست.\n"
-            f"💵 مبلغ لازم: <b>{exc.needed:g} {service.currency}</b>\n"
-            f"💰 موجودی شما: <b>{exc.balance:g} {service.currency}</b>\n\n"
-            "ابتدا کیف پولتان را شارژ کنید:",
-            reply_markup=topup_after_insufficient_keyboard(),
-        )
-        return
-    except PermissionError as exc:
-        await wait.edit_text(f"⛔️ {exc}")
-        return
     except ValueError as exc:
         await wait.edit_text(f"⛔️ {exc}")
         return
@@ -324,8 +339,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
         u = call.from_user
         uname = f"@{u.username}" if u.username else (u.full_name or "—")
         cur = service.product_currency(product)
-        payer = service._payer_for(role, product)
-        pay_note = {"postpaid": "پس‌پرداخت", "wallet": "از کیف پول", "admin": "ادمین"}.get(payer, payer)
+        pay_note = {"postpaid": "پس‌پرداخت", "admin": "ادمین"}.get(payer, payer)
         try:
             await call.bot.send_message(
                 cfg.admin_id,

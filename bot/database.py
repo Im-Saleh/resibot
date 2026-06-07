@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -55,6 +55,8 @@ class Database:
                 self._migrate_v1()
             if current < 2:
                 self._migrate_v2()
+            if current < 3:
+                self._migrate_v3()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -168,6 +170,13 @@ class Database:
                 (r[0], r[1] or "", now, now),
             )
         c.commit()
+
+    def _migrate_v3(self) -> None:
+        # ستون meta برای ذخیره‌ی جزئیات سفارش در انتظار پرداخت (JSON)
+        if not self._column_exists("payments", "meta"):
+            self._conn.execute("ALTER TABLE payments ADD COLUMN meta TEXT DEFAULT ''")
+        self._conn.commit()
+
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
             cur = self._conn.execute(sql, tuple(params))
@@ -394,14 +403,15 @@ class Database:
     # payments
     # ------------------------------------------------------------------ #
     def create_payment(
-        self, order_id: str, tg_id: int, amount: float, currency: str, purpose: str = "wallet_topup"
+        self, order_id: str, tg_id: int, amount: float, currency: str,
+        purpose: str = "wallet_topup", meta: str = "",
     ) -> int:
         now = int(time.time())
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO payments(order_id, tg_id, amount, currency, purpose, status, created_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, 'waiting', ?, ?)",
-                (order_id, tg_id, float(amount), currency, purpose, now, now),
+                "INSERT INTO payments(order_id, tg_id, amount, currency, purpose, status, meta, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
+                (order_id, tg_id, float(amount), currency, purpose, meta, now, now),
             )
             self._conn.commit()
             return int(cur.lastrowid)

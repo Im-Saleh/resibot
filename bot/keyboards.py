@@ -208,30 +208,43 @@ def configs_list_keyboard(rows: list, *, show_owner: bool = False) -> InlineKeyb
 # ---------------------------------------------------------------------- #
 #  منوی جزئیات یک کانفیگ
 # ---------------------------------------------------------------------- #
-def config_actions(config_id: int, *, is_admin: bool = False) -> InlineKeyboardMarkup:
-    rows = [
-        [
-            InlineKeyboardButton(text="🔄 تغییر IP", callback_data=f"cfg_ip:{config_id}"),
-            InlineKeyboardButton(text="📡 تست اتصال", callback_data=f"cfg_ping:{config_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="🌍 تغییر کشور", callback_data=f"cfg_country:{config_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="🗺 تغییر استان", callback_data=f"cfg_state:{config_id}"),
-            InlineKeyboardButton(text="🏙 تغییر شهر", callback_data=f"cfg_city:{config_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="⏱ زمان تعویض IP", callback_data=f"cfg_life:{config_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="📈 مصرف", callback_data=f"cfg_usage:{config_id}"),
-            InlineKeyboardButton(text="🔗 لینک‌ها", callback_data=f"cfg_links:{config_id}"),
-        ],
-        [
-            InlineKeyboardButton(text="♻️ تمدید / افزایش حجم", callback_data=f"cfg_renew:{config_id}"),
-        ],
-    ]
+def config_actions(config_id: int, *, is_admin: bool = False, product: str = "residential") -> InlineKeyboardMarkup:
+    if product == "v2ray":
+        # منوی ساده برای V2Ray عادی
+        rows = [
+            [
+                InlineKeyboardButton(text="📈 مصرف", callback_data=f"cfg_usage:{config_id}"),
+                InlineKeyboardButton(text="🔗 لینک‌ها", callback_data=f"cfg_links:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="♻️ تمدید / افزایش حجم", callback_data=f"cfg_renew:{config_id}"),
+            ],
+        ]
+    else:
+        # منوی کامل برای رزیدنتال
+        rows = [
+            [
+                InlineKeyboardButton(text="🔄 تغییر IP", callback_data=f"cfg_ip:{config_id}"),
+                InlineKeyboardButton(text="📡 تست اتصال", callback_data=f"cfg_ping:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🌍 تغییر کشور", callback_data=f"cfg_country:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="🗺 تغییر استان", callback_data=f"cfg_state:{config_id}"),
+                InlineKeyboardButton(text="🏙 تغییر شهر", callback_data=f"cfg_city:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⏱ زمان تعویض IP", callback_data=f"cfg_life:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="📈 مصرف", callback_data=f"cfg_usage:{config_id}"),
+                InlineKeyboardButton(text="🔗 لینک‌ها", callback_data=f"cfg_links:{config_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="♻️ تمدید / افزایش حجم", callback_data=f"cfg_renew:{config_id}"),
+            ],
+        ]
     if is_admin:
         rows.append([InlineKeyboardButton(text="🗑 حذف کانفیگ", callback_data=f"cfg_del:{config_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ بازگشت به لیست", callback_data="cfg_back")])

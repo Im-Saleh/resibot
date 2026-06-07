@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import secrets
@@ -27,6 +28,7 @@ from .database import (
     PRODUCT_V2RAY,
     ROLE_ADMIN,
     ROLE_RESIDENTIAL_RESELLER,
+    ROLE_USER,
     ROLE_V2RAY_RESELLER,
 )
 from .inbound import (
@@ -662,23 +664,76 @@ class Service:
         # residential
         if role == ROLE_RESIDENTIAL_RESELLER:
             return "postpaid"
-        return "denied"
+        # کاربر عادی غیرهمکار: پرداخت آنلاین (NowPayments)
+        return "nowpayments"
 
     async def purchase_residential(
         self, buyer_tg_id: int, role: str, location: ProxyLocation, volume_gb: int, life: Optional[int]
     ) -> ProvisionResult:
+        """ساخت فوری رزیدنتال برای ادمین (رایگان) و همکار رزیدنتال (پس‌پرداخت)."""
         payer = self._payer_for(role, PRODUCT_RESIDENTIAL)
-        if payer == "denied":
-            raise PermissionError(
-                "کانفیگ رزیدنتال فقط برای همکاران رزیدنتال است. برای همکاری با ادمین هماهنگ کنید."
-            )
+        if payer not in ("admin", "postpaid"):
+            raise ValueError("این مسیر فقط برای ادمین/همکار است.")
         price = self.quote(role, PRODUCT_RESIDENTIAL, volume_gb)
-        # رزیدنتال از کیف پول کسر نمی‌شود (پس‌پرداخت/رایگان)
         result = await self.provision_config(
             buyer_tg_id, location, volume_gb, life,
             product_type=PRODUCT_RESIDENTIAL, price=price, payer=payer,
         )
         return result
+
+    async def create_residential_order(
+        self, buyer_tg_id: int, location: ProxyLocation, volume_gb: int, life: Optional[int]
+    ) -> dict[str, Any]:
+        """سفارش رزیدنتال با پرداخت آنلاین: فاکتور NowPayments می‌سازد و سرویس
+        پس از تأیید پرداخت (IPN) خودکار ساخته می‌شود."""
+        if self.nowpayments is None or not self.cfg.nowpayments_enabled:
+            raise ValueError("درگاه پرداخت پیکربندی نشده است.")
+        if volume_gb < self.min_volume_gb:
+            raise ValueError(f"حداقل حجم خرید {self.min_volume_gb} گیگابایت است.")
+        price_usd = self.quote(ROLE_USER, PRODUCT_RESIDENTIAL, volume_gb)
+        if price_usd <= 0:
+            raise ValueError("مبلغ نامعتبر است.")
+        order_id = f"{self.cfg.brand_name}-ord-{buyer_tg_id}-{secrets.token_hex(5)}"
+        meta = json.dumps({
+            "product": PRODUCT_RESIDENTIAL,
+            "area": location.area, "state": location.state, "city": location.city,
+            "life": int(life or 0), "volume": int(volume_gb),
+        })
+        self.db.create_payment(
+            order_id, buyer_tg_id, price_usd, self.cfg.residential_currency,
+            purpose="order", meta=meta,
+        )
+        ipn_url = self.cfg.public_base_url + "/nowpayments/ipn"
+        try:
+            inv = await self.nowpayments.create_invoice(
+                price_amount=price_usd,
+                price_currency=self.cfg.nowpayments_price_currency,
+                order_id=order_id,
+                order_description=f"Residential {volume_gb}GB for {buyer_tg_id} ({self.cfg.brand_full})",
+                ipn_callback_url=ipn_url,
+                pay_currency=self.cfg.nowpayments_pay_currency,
+            )
+        except Exception:
+            self.db.set_payment_status(order_id, "failed")
+            raise
+        self.db.set_payment_status(order_id, "waiting", invoice_id=str(inv.get("id") or ""))
+        return {"order_id": order_id, "invoice_url": inv.get("invoice_url"), "usd_amount": price_usd}
+
+    async def provision_paid_order(self, payment_row) -> ProvisionResult:
+        """ساخت سرویس برای یک پرداخت تأییدشده (از داخل IPN فراخوانی می‌شود)."""
+        meta = json.loads(payment_row["meta"] or "{}")
+        location = ProxyLocation(
+            area=meta.get("area", ""), state=meta.get("state", ""), city=meta.get("city", ""),
+        )
+        return await self.provision_config(
+            int(payment_row["tg_id"]),
+            location,
+            int(meta.get("volume", self.min_volume_gb)),
+            int(meta.get("life", 0)),
+            product_type=meta.get("product", PRODUCT_RESIDENTIAL),
+            price=float(payment_row["amount"]),
+            payer="nowpayments",
+        )
 
     async def purchase_renew(
         self, buyer_tg_id: int, role: str, config_id: int, add_volume_gb: int

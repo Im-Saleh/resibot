@@ -82,9 +82,10 @@ async def back_to_list(call: CallbackQuery, db: Database, cfg: Settings) -> None
 # ---------------------------------------------------------------------- #
 async def _show_detail(call: CallbackQuery, row, cfg: Settings) -> None:
     is_admin = _is_admin(call.from_user.id, cfg)
+    product = row["product_type"] or "residential"
     await call.message.edit_text(
         config_summary(row, show_owner=is_admin),
-        reply_markup=config_actions(row["id"], is_admin=is_admin),
+        reply_markup=config_actions(row["id"], is_admin=is_admin, product=product),
     )
 
 

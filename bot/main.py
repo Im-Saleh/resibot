@@ -70,7 +70,7 @@ async def run() -> None:
     ipn_runner = None
     if settings.nowpayments_enabled:
         try:
-            ipn_runner = await start_ipn_server(settings, db, bot)
+            ipn_runner = await start_ipn_server(settings, db, bot, service)
         except Exception:  # noqa: BLE001
             logger.exception("راه‌اندازی سرور IPN ناموفق بود؛ شارژ خودکار غیرفعال می‌ماند")
     else:
