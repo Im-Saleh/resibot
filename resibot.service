@@ -1,0 +1,17 @@
+[Unit]
+Description=resibot - Telegram reseller bot for 3x-ui
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m bot
+Restart=always
+RestartSec=5
+# لاگ‌ها در journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,18 @@
+# محیط و رازها
+.env
+
+# دیتابیس و داده‌ها (هنگام آپدیت حفظ می‌شوند)
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# پایتون
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
