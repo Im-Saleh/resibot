@@ -20,7 +20,7 @@ from ..database import (
     ROLE_V2RAY_RESELLER,
 )
 from ..keyboards import partnership_menu, request_decision_keyboard, wallet_menu
-from ..service import Service
+from ..service import S_SHOW_PARTNERSHIP, Service
 from ..states import PartnershipStates, WalletStates
 
 logger = logging.getLogger("resibot.wallet")
@@ -93,10 +93,13 @@ async def wallet_topup_amount(message: Message, state: FSMContext, service: Serv
 #  درخواست همکاری
 # ====================================================================== #
 @router.message(F.text == "🤝 همکاری")
-async def partnership_root(message: Message, state: FSMContext, db: Database, role: str, is_admin: bool) -> None:
+async def partnership_root(message: Message, state: FSMContext, db: Database, service: Service, role: str, is_admin: bool) -> None:
     await state.clear()
     if is_admin:
         await message.answer("شما ادمین هستید.")
+        return
+    if not service.feature_enabled(S_SHOW_PARTNERSHIP):
+        await message.answer("بخش همکاری در حال حاضر غیرفعال است.")
         return
     if role in (ROLE_RESIDENTIAL_RESELLER, ROLE_V2RAY_RESELLER):
         await message.answer("شما در حال حاضر همکار هستید. ✅")
@@ -117,6 +120,9 @@ async def partnership_root(message: Message, state: FSMContext, db: Database, ro
 async def partnership_choose(call: CallbackQuery, state: FSMContext, db: Database, service: Service, role: str, is_admin: bool) -> None:
     if is_admin or role in (ROLE_RESIDENTIAL_RESELLER, ROLE_V2RAY_RESELLER):
         await call.answer("نیازی به درخواست ندارید.", show_alert=True)
+        return
+    if not service.feature_enabled(S_SHOW_PARTNERSHIP):
+        await call.answer("بخش همکاری غیرفعال است.", show_alert=True)
         return
     if db.has_pending_request(call.from_user.id):
         await call.answer("یک درخواست در انتظار دارید.", show_alert=True)

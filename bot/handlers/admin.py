@@ -20,20 +20,32 @@ from ..database import (
 from ..keyboards import (
     admin_panel_menu,
     configs_list_keyboard,
+    custbot_menu,
     prices_menu,
     request_decision_keyboard,
     settings_menu,
     setrole_keyboard,
+    toggles_menu,
     users_menu,
 )
 from ..service import (
     S_HOST,
+    S_IPROYAL_HOST,
+    S_IPROYAL_PASSWORD,
+    S_IPROYAL_PORT,
+    S_IPROYAL_USERNAME,
     S_MIN_VOLUME,
     S_PRICE,
     S_RENEW_MIN_VOLUME,
     S_RESELLER_MIN_BALANCE,
     S_RESELLER_PRICE,
+    S_RESIDENTIAL2_PRICE,
+    S_RESIDENTIAL2_RESELLER_PRICE,
     S_SERVER_IP,
+    S_SHOW_PARTNERSHIP,
+    S_SHOW_RESIDENTIAL,
+    S_SHOW_RESIDENTIAL2,
+    S_SHOW_V2RAY,
     S_SNI,
     S_TOMAN_PER_USD,
     S_V2RAY_PRICE,
@@ -322,6 +334,8 @@ async def adm_prices(call: CallbackQuery, service: Service) -> None:
         "💵 <b>قیمت‌ها (هر گیگابایت)</b>\n"
         f"• رزیدنتال عادی: <b>{service.price_per_gb:g} {usd}</b>\n"
         f"• رزیدنتال همکار: <b>{service.reseller_price_per_gb:g} {usd}</b>\n"
+        f"• رزیدنتال ۲ عادی: <b>{service.residential2_price_per_gb:g} {usd}</b>\n"
+        f"• رزیدنتال ۲ همکار: <b>{service.residential2_reseller_price_per_gb:g} {usd}</b>\n"
         f"• V2Ray عادی: <b>{service.v2ray_price_per_gb:g} {tmn}</b>\n"
         f"• V2Ray همکار: <b>{service.v2ray_reseller_price_per_gb:g} {tmn}</b>\n"
         f"• حداقل موجودی همکار v2ray: <b>{service.reseller_min_balance:g} {tmn}</b>\n"
@@ -334,6 +348,8 @@ async def adm_prices(call: CallbackQuery, service: Service) -> None:
 @router.callback_query(F.data == "adm:settings")
 async def adm_settings(call: CallbackQuery, service: Service) -> None:
     await call.answer()
+    iproyal_pass = service.iproyal_password
+    iproyal_pass_txt = ("••••" + iproyal_pass[-4:]) if iproyal_pass else "—"
     text = (
         "⚙️ <b>تنظیمات سرور</b>\n"
         f"• IP/دامنه: <code>{service.server_ip or '—'}</code>\n"
@@ -341,6 +357,11 @@ async def adm_settings(call: CallbackQuery, service: Service) -> None:
         f"• Host: <code>{escape(service.host)}</code>\n"
         f"• حداقل حجم خرید: <b>{service.min_volume_gb} GB</b>\n"
         f"• حداقل حجم تمدید: <b>{service.renew_min_volume_gb} GB</b>\n\n"
+        "🌍 <b>IPRoyal (رزیدنتال ۲)</b>\n"
+        f"• هاست: <code>{escape(service.iproyal_host or '—')}</code>\n"
+        f"• پورت: <code>{service.iproyal_port}</code>\n"
+        f"• یوزرنیم: <code>{escape(service.iproyal_username or '—')}</code>\n"
+        f"• پسورد: <code>{escape(iproyal_pass_txt)}</code>\n\n"
         "برای تغییر یکی را انتخاب کنید:"
     )
     await call.message.answer(text, reply_markup=settings_menu())
@@ -355,10 +376,16 @@ _SETTING_PROMPTS = {
     "renew_min_volume": (AdminStates.set_renew_min_volume, "حداقل حجم تمدید (گیگابایت) را بفرستید:"),
     "price": (AdminStates.set_price, "قیمت رزیدنتال عادی (هر گیگ) را بفرستید:"),
     "reseller_price": (AdminStates.set_reseller_price, "قیمت رزیدنتال همکار (هر گیگ) را بفرستید:"),
+    "residential2_price": (AdminStates.set_residential2_price, "قیمت رزیدنتال ۲ عادی (هر گیگ، دلار) را بفرستید:"),
+    "residential2_reseller_price": (AdminStates.set_residential2_reseller_price, "قیمت رزیدنتال ۲ همکار (هر گیگ، دلار) را بفرستید:"),
     "v2ray_price": (AdminStates.set_v2ray_price, "قیمت V2Ray عادی (هر گیگ) را بفرستید:"),
     "v2ray_reseller_price": (AdminStates.set_v2ray_reseller_price, "قیمت V2Ray همکار (هر گیگ) را بفرستید:"),
     "reseller_min_balance": (AdminStates.set_reseller_min_balance, "حداقل موجودی همکار v2ray را بفرستید:"),
     "toman_rate": (AdminStates.set_toman_rate, "نرخ هر دلار/تتر به تومان را بفرستید (مثلاً 175000):"),
+    "iproyal_host": (AdminStates.set_iproyal_host, "هاست IPRoyal را بفرستید (مثلاً geo.iproyal.com):"),
+    "iproyal_port": (AdminStates.set_iproyal_port, "پورت IPRoyal را بفرستید (مثلاً 12321):"),
+    "iproyal_username": (AdminStates.set_iproyal_username, "یوزرنیم IPRoyal را بفرستید:"),
+    "iproyal_password": (AdminStates.set_iproyal_password, "پسورد پایه‌ی IPRoyal را بفرستید (بدون country/session/lifetime):"),
 }
 
 
@@ -444,6 +471,42 @@ async def s_reseller_price(message: Message, state: FSMContext, service: Service
     await _save_float(message, state, service, S_RESELLER_PRICE, "قیمت رزیدنتال همکار")
 
 
+@router.message(AdminStates.set_residential2_price)
+async def s_residential2_price(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_float(message, state, service, S_RESIDENTIAL2_PRICE, "قیمت رزیدنتال ۲ عادی")
+
+
+@router.message(AdminStates.set_residential2_reseller_price)
+async def s_residential2_reseller_price(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_float(message, state, service, S_RESIDENTIAL2_RESELLER_PRICE, "قیمت رزیدنتال ۲ همکار")
+
+
+@router.message(AdminStates.set_iproyal_host)
+async def s_iproyal_host(message: Message, state: FSMContext, service: Service) -> None:
+    _save_text(service, S_IPROYAL_HOST, message.text or "")
+    await state.clear()
+    await message.answer("✅ هاست IPRoyal به‌روزرسانی شد.")
+
+
+@router.message(AdminStates.set_iproyal_port)
+async def s_iproyal_port(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_int(message, state, service, S_IPROYAL_PORT, "پورت IPRoyal")
+
+
+@router.message(AdminStates.set_iproyal_username)
+async def s_iproyal_username(message: Message, state: FSMContext, service: Service) -> None:
+    _save_text(service, S_IPROYAL_USERNAME, message.text or "")
+    await state.clear()
+    await message.answer("✅ یوزرنیم IPRoyal به‌روزرسانی شد.")
+
+
+@router.message(AdminStates.set_iproyal_password)
+async def s_iproyal_password(message: Message, state: FSMContext, service: Service) -> None:
+    _save_text(service, S_IPROYAL_PASSWORD, message.text or "")
+    await state.clear()
+    await message.answer("✅ پسورد پایه‌ی IPRoyal به‌روزرسانی شد.")
+
+
 @router.message(AdminStates.set_v2ray_price)
 async def s_v2ray_price(message: Message, state: FSMContext, service: Service) -> None:
     await _save_float(message, state, service, S_V2RAY_PRICE, "قیمت V2Ray عادی")
@@ -472,3 +535,92 @@ async def s_toman_rate(message: Message, state: FSMContext, service: Service) ->
     service.set_setting(S_TOMAN_PER_USD, str(val))
     await state.clear()
     await message.answer(f"✅ نرخ تتر/تومان به <b>{val:g}</b> تغییر کرد.")
+
+
+
+# ====================================================================== #
+#  نمایش/مخفی‌سازی بخش‌ها (همکاری و محصولات)
+# ====================================================================== #
+_TOGGLE_KEYS = {
+    "partnership": (S_SHOW_PARTNERSHIP, "همکاری"),
+    "residential": (S_SHOW_RESIDENTIAL, "رزیدنتال"),
+    "residential2": (S_SHOW_RESIDENTIAL2, "رزیدنتال ۲"),
+    "v2ray": (S_SHOW_V2RAY, "V2Ray"),
+}
+
+
+def _toggles_kb(service: Service):
+    return toggles_menu(
+        partnership=service.feature_enabled(S_SHOW_PARTNERSHIP),
+        residential=service.feature_enabled(S_SHOW_RESIDENTIAL),
+        residential2=service.feature_enabled(S_SHOW_RESIDENTIAL2),
+        v2ray=service.feature_enabled(S_SHOW_V2RAY),
+    )
+
+
+@router.callback_query(F.data == "adm:toggles")
+async def adm_toggles(call: CallbackQuery, service: Service) -> None:
+    await call.answer()
+    await call.message.answer(
+        "🔀 <b>نمایش/مخفی‌سازی بخش‌ها</b>\n\n"
+        "با زدن هر گزینه، نمایش آن در ربات روشن/خاموش می‌شود:\n"
+        "• «همکاری»: دکمه‌ی درخواست همکاری در منوی اصلی\n"
+        "• «رزیدنتال / رزیدنتال ۲ / V2Ray»: نمایش محصول در منوی خرید\n\n"
+        "✅ = نمایش داده می‌شود | ❌ = مخفی است",
+        reply_markup=_toggles_kb(service),
+    )
+
+
+@router.callback_query(F.data.startswith("tgl:"))
+async def adm_toggle_flip(call: CallbackQuery, service: Service) -> None:
+    key = call.data.split(":", 1)[1]
+    entry = _TOGGLE_KEYS.get(key)
+    if not entry:
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    setting_key, label = entry
+    new_val = service.toggle_feature(setting_key)
+    await call.answer(f"{label}: {'فعال شد ✅' if new_val else 'مخفی شد ❌'}")
+    # به‌روزرسانی کیبورد با وضعیت جدید
+    try:
+        await call.message.edit_reply_markup(reply_markup=_toggles_kb(service))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# ====================================================================== #
+#  ربات کمکی مشتری (تغییر IP و بررسی تنظیمات توسط خود مشتری)
+# ====================================================================== #
+def _custbot_info_text() -> str:
+    return (
+        "🤖 <b>ربات کمکی مشتری</b>\n\n"
+        "این یک ربات تلگرام جداگانه است که هر مشتری می‌تواند خودش استارت کند "
+        "و بدون نیاز به دسترسی به این ربات اصلی، IP سرویسش را تغییر دهد و "
+        "تنظیمات IP را بررسی کند.\n\n"
+        "📌 <b>تعیین مشتری از این منو انجام نمی‌شود.</b>\n"
+        "هر همکار/فروشنده باید از داخل <b>مدیریت سرویس‌ها</b> (روی همان کانفیگی "
+        "که فروخته)، دکمه‌ی «🤖 تعیین مشتری (ربات کمکی)» را بزند و آیدی عددی "
+        "تلگرام مشتریِ آن سفارش مشخص را وارد کند.\n\n"
+        "به این ترتیب هر مشتری فقط همان سرویسی را می‌بیند و مدیریت می‌کند که "
+        "برایش خریداری شده — نه سرویس‌های مشتریان دیگر همان همکار."
+    )
+
+
+@router.callback_query(F.data == "adm:custbot")
+async def adm_custbot(call: CallbackQuery) -> None:
+    await call.answer()
+    await call.message.answer(_custbot_info_text(), reply_markup=custbot_menu())
+
+
+@router.callback_query(F.data == "custbot:help")
+async def custbot_help(call: CallbackQuery) -> None:
+    await call.answer()
+    await call.message.answer(
+        "ℹ️ <b>راهنمای راه‌اندازی ربات کمکی مشتری</b>\n\n"
+        "1️⃣ توکن ربات کمکی را در فایل <code>.env</code> با کلید "
+        "<code>CUSTOMER_BOT_TOKEN</code> تنظیم کنید (یک‌بار، در نصب).\n"
+        "2️⃣ سرویس <code>resibot-customer</code> را راه‌اندازی کنید.\n"
+        "3️⃣ برای هر سرویس، از «🧾 همه‌ی سرویس‌ها» → انتخاب سرویس → "
+        "«🤖 تعیین مشتری (ربات کمکی)» آیدی عددی مشتری را وارد کنید.\n"
+        "4️⃣ مشتری ربات کمکی را /start می‌کند و فقط همان سرویس را می‌بیند."
+    )

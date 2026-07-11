@@ -67,7 +67,10 @@ class ProxyLocation:
 
 
 def build_username(user_base: str, loc: ProxyLocation) -> str:
-    """رشته‌ی کامل username را با ترتیب area, state, city, life, session می‌سازد."""
+    """رشته‌ی کامل username را با ترتیب area, state, city, life, session می‌سازد.
+
+    این فرمت مخصوص SmartProxy است (رزیدنتال ۱): همه‌ی پارامترها در username.
+    """
     loc = loc.cleaned()
     parts = [user_base]
     if loc.area:
@@ -82,6 +85,50 @@ def build_username(user_base: str, loc: ProxyLocation) -> str:
         parts.append(f"life-{life}")
     if loc.session:
         parts.append(f"session-{loc.session}")
+    return "_".join(parts)
+
+
+# ---------------------------------------------------------------------- #
+#  IPRoyal (رزیدنتال ۲)
+# ---------------------------------------------------------------------- #
+# در IPRoyal پارامترهای لوکیشن/سشن داخل رشته‌ی «password» کدگذاری می‌شوند، نه
+# username. کد کشور و نام شهر با حروف کوچک نوشته می‌شوند و مدت ماندگاری فقط با
+# یک واحد زمانی بیان می‌شود (اینجا ساعت یا دقیقه). حداکثر مجاز ۷ روز است.
+#     نمونه: x1NFN2nK3r2w2umj_country-gb_session-YkaWtTRI_lifetime-168h
+
+# حداکثر ماندگاری IPRoyal بر حسب دقیقه (۷ روز)
+IPROYAL_MAX_LIFE_MIN = 7 * 24 * 60  # 10080
+
+
+def _iproyal_lifetime(minutes: int) -> str:
+    """دقیقه را به رشته‌ی lifetime سازگار با IPRoyal تبدیل می‌کند (تک‌واحدی).
+
+    اگر مضربی از ۶۰ باشد بر حسب ساعت، در غیر این صورت بر حسب دقیقه.
+    """
+    m = max(1, min(IPROYAL_MAX_LIFE_MIN, int(minutes)))
+    if m % 60 == 0:
+        return f"lifetime-{m // 60}h"
+    return f"lifetime-{m}m"
+
+
+def build_iproyal_password(base_password: str, loc: ProxyLocation) -> str:
+    """رشته‌ی کامل password برای IPRoyal را می‌سازد.
+
+    ترتیب: country, state, city, session, lifetime — مطابق مستندات IPRoyal.
+    کد کشور و نام شهر با حروف کوچک نوشته می‌شوند.
+    """
+    loc = loc.cleaned()
+    parts = [base_password]
+    if loc.area:
+        parts.append(f"country-{loc.area.lower()}")
+    if loc.state:
+        parts.append(f"state-{loc.state.lower()}")
+    if loc.city:
+        parts.append(f"city-{loc.city.lower()}")
+    if loc.session:
+        parts.append(f"session-{loc.session}")
+    if loc.life and loc.life > 0:
+        parts.append(_iproyal_lifetime(loc.life))
     return "_".join(parts)
 
 

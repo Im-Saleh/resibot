@@ -49,5 +49,19 @@ systemctl restart "$SERVICE_NAME"
 
 sleep 2
 systemctl --no-pager --lines=10 status "$SERVICE_NAME" || true
+
+# ربات کمکی مشتری (اگر سرویسش نصب شده باشد یا توکنش تنظیم شده باشد)
+CUSTOMER_SERVICE_NAME="resibot-customer"
+if [[ -f "$INSTALL_DIR/resibot-customer.service" ]] && grep -qE "^CUSTOMER_BOT_TOKEN=.+" "$INSTALL_DIR/.env" 2>/dev/null; then
+  bold "==> به‌روزرسانی/ری‌استارت سرویس ربات کمکی مشتری"
+  CUSTOMER_SERVICE_PATH="/etc/systemd/system/${CUSTOMER_SERVICE_NAME}.service"
+  sed "s#__INSTALL_DIR__#${INSTALL_DIR}#g" "$INSTALL_DIR/resibot-customer.service" > "$CUSTOMER_SERVICE_PATH"
+  systemctl daemon-reload
+  systemctl enable "$CUSTOMER_SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl restart "$CUSTOMER_SERVICE_NAME"
+  sleep 2
+  systemctl --no-pager --lines=10 status "$CUSTOMER_SERVICE_NAME" || true
+fi
+
 green ""
 green "✅ آپدیت کامل شد. دیتابیس و تنظیمات حفظ شدند."

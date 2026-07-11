@@ -25,6 +25,7 @@ from .config import Settings
 from .database import (
     Database,
     PRODUCT_RESIDENTIAL,
+    PRODUCT_RESIDENTIAL2,
     PRODUCT_V2RAY,
     ROLE_ADMIN,
     ROLE_RESIDENTIAL_RESELLER,
@@ -39,7 +40,13 @@ from .inbound import (
     build_vless_link,
 )
 from .panel import PanelClient, PanelError
-from .proxy import ProxyLocation, build_username, generate_session
+from .proxy import (
+    IPROYAL_MAX_LIFE_MIN,
+    ProxyLocation,
+    build_iproyal_password,
+    build_username,
+    generate_session,
+)
 from . import xray_config as xc
 
 logger = logging.getLogger("resibot.service")
@@ -60,6 +67,27 @@ S_V2RAY_PRICE = "v2ray_price_per_gb"
 S_V2RAY_RESELLER_PRICE = "v2ray_reseller_price_per_gb"
 S_RESELLER_MIN_BALANCE = "reseller_min_balance"
 S_TOMAN_PER_USD = "toman_per_usd"
+
+# رزیدنتال ۲ (IPRoyal)
+S_RESIDENTIAL2_PRICE = "residential2_price_per_gb"
+S_RESIDENTIAL2_RESELLER_PRICE = "residential2_reseller_price_per_gb"
+S_IPROYAL_HOST = "iproyal_host"
+S_IPROYAL_PORT = "iproyal_port"
+S_IPROYAL_USERNAME = "iproyal_username"
+S_IPROYAL_PASSWORD = "iproyal_password"
+
+# کلیدهای نمایش/مخفی‌سازی بخش‌ها (مقدار "1" یعنی فعال، "0" یعنی غیرفعال)
+S_SHOW_PARTNERSHIP = "show_partnership"
+S_SHOW_RESIDENTIAL = "show_residential"
+S_SHOW_RESIDENTIAL2 = "show_residential2"
+S_SHOW_V2RAY = "show_v2ray"
+
+# نگاشت کلید نمایش هر محصول
+_PRODUCT_SHOW_KEY = {
+    PRODUCT_RESIDENTIAL: S_SHOW_RESIDENTIAL,
+    PRODUCT_RESIDENTIAL2: S_SHOW_RESIDENTIAL2,
+    PRODUCT_V2RAY: S_SHOW_V2RAY,
+}
 
 
 @dataclass
@@ -107,6 +135,18 @@ class Service:
         self.db.seed_setting(S_V2RAY_RESELLER_PRICE, str(self.cfg.v2ray_reseller_price_per_gb))
         self.db.seed_setting(S_RESELLER_MIN_BALANCE, str(self.cfg.reseller_min_balance))
         self.db.seed_setting(S_TOMAN_PER_USD, str(self.cfg.toman_per_usd))
+        # رزیدنتال ۲ (IPRoyal)
+        self.db.seed_setting(S_RESIDENTIAL2_PRICE, str(self.cfg.residential2_price_per_gb))
+        self.db.seed_setting(S_RESIDENTIAL2_RESELLER_PRICE, str(self.cfg.residential2_reseller_price_per_gb))
+        self.db.seed_setting(S_IPROYAL_HOST, self.cfg.iproyal_host)
+        self.db.seed_setting(S_IPROYAL_PORT, str(self.cfg.iproyal_port))
+        self.db.seed_setting(S_IPROYAL_USERNAME, self.cfg.iproyal_username)
+        self.db.seed_setting(S_IPROYAL_PASSWORD, self.cfg.iproyal_password)
+        # نمایش/مخفی‌سازی بخش‌ها
+        self.db.seed_setting(S_SHOW_PARTNERSHIP, "1" if self.cfg.show_partnership else "0")
+        self.db.seed_setting(S_SHOW_RESIDENTIAL, "1" if self.cfg.show_residential else "0")
+        self.db.seed_setting(S_SHOW_RESIDENTIAL2, "1" if self.cfg.show_residential2 else "0")
+        self.db.seed_setting(S_SHOW_V2RAY, "1" if self.cfg.show_v2ray else "0")
 
     @property
     def server_ip(self) -> str:
@@ -159,6 +199,46 @@ class Service:
         return self._fsetting(S_RESELLER_PRICE, self.cfg.reseller_price_per_gb)
 
     @property
+    def residential2_price_per_gb(self) -> float:
+        return self._fsetting(S_RESIDENTIAL2_PRICE, self.cfg.residential2_price_per_gb)
+
+    @property
+    def residential2_reseller_price_per_gb(self) -> float:
+        return self._fsetting(S_RESIDENTIAL2_RESELLER_PRICE, self.cfg.residential2_reseller_price_per_gb)
+
+    # --- IPRoyal (رزیدنتال ۲) ---
+    @property
+    def iproyal_host(self) -> str:
+        return self.db.get_setting(S_IPROYAL_HOST, self.cfg.iproyal_host) or ""
+
+    @property
+    def iproyal_port(self) -> int:
+        return self._isetting(S_IPROYAL_PORT, self.cfg.iproyal_port)
+
+    @property
+    def iproyal_username(self) -> str:
+        return self.db.get_setting(S_IPROYAL_USERNAME, self.cfg.iproyal_username) or ""
+
+    @property
+    def iproyal_password(self) -> str:
+        return self.db.get_setting(S_IPROYAL_PASSWORD, self.cfg.iproyal_password) or ""
+
+    # --- نمایش/مخفی‌سازی بخش‌ها ---
+    def feature_enabled(self, key: str, default: bool = True) -> bool:
+        raw = self.db.get_setting(key, "1" if default else "0")
+        return str(raw).strip() not in ("0", "false", "False", "no", "off", "")
+
+    def toggle_feature(self, key: str) -> bool:
+        """وضعیت یک قابلیت را برعکس می‌کند و مقدار جدید را برمی‌گرداند."""
+        new_val = not self.feature_enabled(key)
+        self.db.set_setting(key, "1" if new_val else "0")
+        return new_val
+
+    def product_enabled(self, product: str) -> bool:
+        key = _PRODUCT_SHOW_KEY.get(product)
+        return True if key is None else self.feature_enabled(key)
+
+    @property
     def v2ray_price_per_gb(self) -> float:
         return self._fsetting(S_V2RAY_PRICE, self.cfg.v2ray_price_per_gb)
 
@@ -188,7 +268,7 @@ class Service:
         return self.cfg.residential_currency
 
     def product_currency(self, product: str) -> str:
-        """واحد پول هر محصول: رزیدنتال = دلار، V2Ray = تومان (کیف پول)."""
+        """واحد پول هر محصول: رزیدنتال/رزیدنتال۲ = دلار، V2Ray = تومان (کیف پول)."""
         if product == PRODUCT_V2RAY:
             return self.cfg.wallet_currency
         return self.cfg.residential_currency
@@ -199,10 +279,24 @@ class Service:
             if role == ROLE_V2RAY_RESELLER:
                 return self.v2ray_reseller_price_per_gb
             return self.v2ray_price_per_gb
+        if product == PRODUCT_RESIDENTIAL2:
+            if role == ROLE_RESIDENTIAL_RESELLER:
+                return self.residential2_reseller_price_per_gb
+            return self.residential2_price_per_gb
         # residential
         if role == ROLE_RESIDENTIAL_RESELLER:
             return self.reseller_price_per_gb
         return self.price_per_gb
+
+    @staticmethod
+    def max_life_for(product: str) -> int:
+        """حداکثر مدت تعویض خودکار IP (دقیقه) بر اساس محصول.
+
+        رزیدنتال ۲ (IPRoyal) تا ۷ روز پشتیبانی می‌کند؛ رزیدنتال ۱ تا ۲۴ ساعت.
+        """
+        if product == PRODUCT_RESIDENTIAL2:
+            return IPROYAL_MAX_LIFE_MIN
+        return 1440
 
     def quote(self, role: str, product: str, volume_gb: int) -> float:
         return round(self.price_per_gb_for(role, product) * int(volume_gb), 2)
@@ -271,6 +365,36 @@ class Service:
     def _smartproxy_username(self, loc: ProxyLocation) -> str:
         return build_username(self.cfg.smartproxy_user_base, loc)
 
+    def _build_proxy_outbound(
+        self, product: str, outbound_tag: str, loc: ProxyLocation
+    ) -> dict[str, Any]:
+        """اوتباند http مناسب هر محصول را می‌سازد.
+
+        - رزیدنتال ۲ (IPRoyal): پارامترها در password کدگذاری می‌شوند.
+        - رزیدنتال ۱ / بقیه (SmartProxy): پارامترها در username کدگذاری می‌شوند.
+        """
+        if product == PRODUCT_RESIDENTIAL2:
+            if not (self.iproyal_username and self.iproyal_password and self.iproyal_host):
+                raise ValueError(
+                    "تنظیمات IPRoyal (رزیدنتال ۲) کامل نیست. ادمین باید یوزرنیم/پسورد/هاست را ست کند."
+                )
+            password = build_iproyal_password(self.iproyal_password, loc)
+            return xc.build_smartproxy_outbound(
+                tag=outbound_tag,
+                host=self.iproyal_host,
+                port=self.iproyal_port,
+                username=self.iproyal_username,
+                password=password,
+            )
+        username = self._smartproxy_username(loc)
+        return xc.build_smartproxy_outbound(
+            tag=outbound_tag,
+            host=self.cfg.smartproxy_host,
+            port=self.cfg.smartproxy_port,
+            username=username,
+            password=self.cfg.smartproxy_password,
+        )
+
     def _vless_link(self, uuid: str, port: int, remark: str) -> str:
         return build_vless_link(
             uuid=uuid,
@@ -285,21 +409,12 @@ class Service:
             remark=remark,
         )
 
-    async def _apply_outbound(
-        self, inbound_tag: str, outbound_tag: str, username: str
-    ) -> None:
-        """اوتباند SmartProxy و روتینگ‌رول را در کانفیگ Xray اعمال و ری‌استارت می‌کند."""
+    async def _apply_outbound(self, inbound_tag: str, outbound: dict[str, Any]) -> None:
+        """اوتباند (از پیش‌ساخته‌شده) و روتینگ‌رول را در کانفیگ Xray اعمال و ری‌استارت می‌کند."""
         async with self._xray_lock:
             config = await self.panel.get_xray_config()
-            outbound = xc.build_smartproxy_outbound(
-                tag=outbound_tag,
-                host=self.cfg.smartproxy_host,
-                port=self.cfg.smartproxy_port,
-                username=username,
-                password=self.cfg.smartproxy_password,
-            )
             xc.upsert_outbound(config, outbound)
-            xc.upsert_routing_rule(config, inbound_tag, outbound_tag)
+            xc.upsert_routing_rule(config, inbound_tag, outbound["tag"])
             await self.panel.update_xray_config(config)
         await self.panel.restart_xray()
 
@@ -330,7 +445,11 @@ class Service:
         if not self.server_ip:
             raise ValueError("IP/دامنه‌ی سرور تنظیم نشده است. ادمین باید آن را ست کند.")
 
-        life_val = self._clamp_life(self.cfg.smartproxy_life if life is None else life)
+        default_life = (
+            self.cfg.iproyal_life if product_type == PRODUCT_RESIDENTIAL2
+            else self.cfg.smartproxy_life
+        )
+        life_val = self._clamp_life(default_life if life is None else life, product_type)
 
         ps = await self._panel_settings()
         spec = await self._build_inbound_spec()
@@ -369,9 +488,9 @@ class Service:
             session=session,
         )
         outbound_tag = f"out-{inbound_id}"
-        username = self._smartproxy_username(loc)
+        outbound = self._build_proxy_outbound(product_type, outbound_tag, loc)
         try:
-            await self._apply_outbound(inbound_tag, outbound_tag, username)
+            await self._apply_outbound(inbound_tag, outbound)
         except Exception:
             # در صورت خطا اینباند ساخته‌شده را پاک می‌کنیم تا چیزی نصفه نماند
             try:
@@ -431,15 +550,18 @@ class Service:
         return 0
 
     @staticmethod
-    def _clamp_life(life: int) -> int:
-        """life معتبر: 0 (بدون تعویض خودکار) یا 1..1440 دقیقه."""
+    def _clamp_life(life: int, product: str = PRODUCT_RESIDENTIAL) -> int:
+        """life معتبر: 0 (بدون تعویض خودکار) یا 1..max دقیقه.
+
+        سقف بر اساس محصول تعیین می‌شود (رزیدنتال ۲/IPRoyal تا ۷ روز).
+        """
         try:
             life = int(life)
         except (TypeError, ValueError):
             return 0
         if life <= 0:
             return 0
-        return min(1440, life)
+        return min(Service.max_life_for(product), life)
 
     # ------------------------------------------------------------------ #
     #  تغییر IP و لوکیشن
@@ -448,16 +570,17 @@ class Service:
         row = self.db.get_config(config_id)
         if not row:
             raise ValueError("کانفیگ پیدا نشد.")
+        product = row["product_type"] or PRODUCT_RESIDENTIAL
         new_session = generate_session()
         loc = ProxyLocation(
             area=row["area"],
             state=row["state"],
             city=row["city"],
-            life=self._clamp_life(row["life"]),
+            life=self._clamp_life(row["life"], product),
             session=new_session,
         )
-        username = self._smartproxy_username(loc)
-        await self._apply_outbound(row["inbound_tag"], row["outbound_tag"], username)
+        outbound = self._build_proxy_outbound(product, row["outbound_tag"], loc)
+        await self._apply_outbound(row["inbound_tag"], outbound)
         self.db.update_config_location(
             config_id,
             area=row["area"],
@@ -479,16 +602,17 @@ class Service:
         row = self.db.get_config(config_id)
         if not row:
             raise ValueError("کانفیگ پیدا نشد.")
+        product = row["product_type"] or PRODUCT_RESIDENTIAL
         session = generate_session() if regenerate_session else row["session"]
         loc = ProxyLocation(
             area=area,
             state=state,
             city=city,
-            life=self._clamp_life(row["life"]),
+            life=self._clamp_life(row["life"], product),
             session=session,
         )
-        username = self._smartproxy_username(loc)
-        await self._apply_outbound(row["inbound_tag"], row["outbound_tag"], username)
+        outbound = self._build_proxy_outbound(product, row["outbound_tag"], loc)
+        await self._apply_outbound(row["inbound_tag"], outbound)
         self.db.update_config_location(
             config_id, area=loc.area, state=loc.state, city=loc.city, session=session
         )
@@ -502,7 +626,8 @@ class Service:
         row = self.db.get_config(config_id)
         if not row:
             raise ValueError("کانفیگ پیدا نشد.")
-        life_val = self._clamp_life(minutes)
+        product = row["product_type"] or PRODUCT_RESIDENTIAL
+        life_val = self._clamp_life(minutes, product)
         loc = ProxyLocation(
             area=row["area"],
             state=row["state"],
@@ -510,8 +635,8 @@ class Service:
             life=life_val,
             session=row["session"],
         )
-        username = self._smartproxy_username(loc)
-        await self._apply_outbound(row["inbound_tag"], row["outbound_tag"], username)
+        outbound = self._build_proxy_outbound(product, row["outbound_tag"], loc)
+        await self._apply_outbound(row["inbound_tag"], outbound)
         self.db.update_config_life(config_id, life_val)
         return life_val
 
@@ -581,18 +706,12 @@ class Service:
         row = self.db.get_config(config_id)
         if not row:
             raise ValueError("کانفیگ پیدا نشد.")
+        product = row["product_type"] or PRODUCT_RESIDENTIAL
         loc = ProxyLocation(
             area=row["area"], state=row["state"], city=row["city"],
-            life=self._clamp_life(row["life"]), session=row["session"],
+            life=self._clamp_life(row["life"], product), session=row["session"],
         )
-        username = self._smartproxy_username(loc)
-        outbound = xc.build_smartproxy_outbound(
-            tag=row["outbound_tag"],
-            host=self.cfg.smartproxy_host,
-            port=self.cfg.smartproxy_port,
-            username=username,
-            password=self.cfg.smartproxy_password,
-        )
+        outbound = self._build_proxy_outbound(product, row["outbound_tag"], loc)
         res = await self.panel.test_outbound(outbound, mode="tcp")
         obj = res.get("obj", {}) if isinstance(res, dict) else {}
         return obj or {}
@@ -668,34 +787,36 @@ class Service:
         return "nowpayments"
 
     async def purchase_residential(
-        self, buyer_tg_id: int, role: str, location: ProxyLocation, volume_gb: int, life: Optional[int]
+        self, buyer_tg_id: int, role: str, location: ProxyLocation, volume_gb: int,
+        life: Optional[int], *, product: str = PRODUCT_RESIDENTIAL,
     ) -> ProvisionResult:
-        """ساخت فوری رزیدنتال برای ادمین (رایگان) و همکار رزیدنتال (پس‌پرداخت)."""
-        payer = self._payer_for(role, PRODUCT_RESIDENTIAL)
+        """ساخت فوری رزیدنتال/رزیدنتال۲ برای ادمین (رایگان) و همکار رزیدنتال (پس‌پرداخت)."""
+        payer = self._payer_for(role, product)
         if payer not in ("admin", "postpaid"):
             raise ValueError("این مسیر فقط برای ادمین/همکار است.")
-        price = self.quote(role, PRODUCT_RESIDENTIAL, volume_gb)
+        price = self.quote(role, product, volume_gb)
         result = await self.provision_config(
             buyer_tg_id, location, volume_gb, life,
-            product_type=PRODUCT_RESIDENTIAL, price=price, payer=payer,
+            product_type=product, price=price, payer=payer,
         )
         return result
 
     async def create_residential_order(
-        self, buyer_tg_id: int, location: ProxyLocation, volume_gb: int, life: Optional[int]
+        self, buyer_tg_id: int, location: ProxyLocation, volume_gb: int,
+        life: Optional[int], *, product: str = PRODUCT_RESIDENTIAL,
     ) -> dict[str, Any]:
-        """سفارش رزیدنتال با پرداخت آنلاین: فاکتور NowPayments می‌سازد و سرویس
-        پس از تأیید پرداخت (IPN) خودکار ساخته می‌شود."""
+        """سفارش رزیدنتال/رزیدنتال۲ با پرداخت آنلاین: فاکتور NowPayments می‌سازد و
+        سرویس پس از تأیید پرداخت (IPN) خودکار ساخته می‌شود."""
         if self.nowpayments is None or not self.cfg.nowpayments_enabled:
             raise ValueError("درگاه پرداخت پیکربندی نشده است.")
         if volume_gb < self.min_volume_gb:
             raise ValueError(f"حداقل حجم خرید {self.min_volume_gb} گیگابایت است.")
-        price_usd = self.quote(ROLE_USER, PRODUCT_RESIDENTIAL, volume_gb)
+        price_usd = self.quote(ROLE_USER, product, volume_gb)
         if price_usd <= 0:
             raise ValueError("مبلغ نامعتبر است.")
         order_id = f"{self.cfg.brand_name}-ord-{buyer_tg_id}-{secrets.token_hex(5)}"
         meta = json.dumps({
-            "product": PRODUCT_RESIDENTIAL,
+            "product": product,
             "area": location.area, "state": location.state, "city": location.city,
             "life": int(life or 0), "volume": int(volume_gb),
         })
@@ -709,7 +830,7 @@ class Service:
                 price_amount=price_usd,
                 price_currency=self.cfg.nowpayments_price_currency,
                 order_id=order_id,
-                order_description=f"Residential {volume_gb}GB for {buyer_tg_id} ({self.cfg.brand_full})",
+                order_description=f"{product} {volume_gb}GB for {buyer_tg_id} ({self.cfg.brand_full})",
                 ipn_callback_url=ipn_url,
                 pay_currency=self.cfg.nowpayments_pay_currency,
             )

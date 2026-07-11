@@ -1,4 +1,10 @@
-"""فلوی ثبت سفارش جدید (مشترک بین ادمین و نماینده)."""
+"""فلوی ثبت سفارش جدید (مشترک بین ادمین و نماینده).
+
+از دو محصول رزیدنتال پشتیبانی می‌کند:
+  - رزیدنتال (SmartProxy): کشور → استان → شهر → زمان تعویض IP (تا ۲۴ ساعت)
+  - رزیدنتال ۲ (IPRoyal):  کشور → شهر → زمان تعویض IP (تا ۷ روز)
+انتخاب لوکیشن و بازه‌ی زمانی بر اساس محصولِ ذخیره‌شده در state تعیین می‌شود.
+"""
 from __future__ import annotations
 
 import logging
@@ -13,20 +19,21 @@ from aiogram.types import (
     Message,
 )
 
-from .. import countries, locations
+from .. import countries, iproyal_locations, locations
 from ..config import Settings
 from ..database import (
     PRODUCT_RESIDENTIAL,
+    PRODUCT_RESIDENTIAL2,
     ROLE_ADMIN,
     ROLE_RESIDENTIAL_RESELLER,
 )
 from ..keyboards import (
+    LIFE_PRESETS_RES2,
     confirm_purchase_keyboard,
     country_keyboard,
     country_results_keyboard,
     life_keyboard,
     options_keyboard,
-    topup_after_insufficient_keyboard,
 )
 from ..proxy import ProxyLocation, normalize_code, validate_code
 from ..service import InsufficientBalance, Service
@@ -37,24 +44,48 @@ logger = logging.getLogger("resibot.order")
 router = Router(name="order")
 
 
+def _is_res2(data: dict) -> bool:
+    return data.get("product") == PRODUCT_RESIDENTIAL2
+
+
+def _max_life(product: str) -> int:
+    return Service.max_life_for(product)
+
+
 # ---------------------------------------------------------------------- #
 #  شروع سفارش از منوی محصولات
 # ---------------------------------------------------------------------- #
-@router.callback_query(F.data == "buy:residential")
-async def buy_residential(call: CallbackQuery, state: FSMContext) -> None:
+async def _start_residential(call: CallbackQuery, state: FSMContext, product: str, service: Service) -> None:
+    if not service.product_enabled(product):
+        await call.answer("این محصول در حال حاضر غیرفعال است.", show_alert=True)
+        return
     await state.clear()
     await state.set_state(OrderStates.choosing_country)
-    await state.update_data(product=PRODUCT_RESIDENTIAL)
+    await state.update_data(product=product)
     await call.answer()
-    await call.message.answer(
-        "🌍 لطفاً کشور (لوکیشن) موردنظر را انتخاب کنید:",
-        reply_markup=country_keyboard("ord_country"),
-    )
+    if product == PRODUCT_RESIDENTIAL2:
+        kb = country_keyboard("ord_country", popular=iproyal_locations.popular())
+    else:
+        kb = country_keyboard("ord_country")
+    await call.message.answer("🌍 لطفاً کشور (لوکیشن) موردنظر را انتخاب کنید:", reply_markup=kb)
+
+
+@router.callback_query(F.data == "buy:residential")
+async def buy_residential(call: CallbackQuery, state: FSMContext, service: Service) -> None:
+    await _start_residential(call, state, PRODUCT_RESIDENTIAL, service)
+
+
+@router.callback_query(F.data == "buy:residential2")
+async def buy_residential2(call: CallbackQuery, state: FSMContext, service: Service) -> None:
+    await _start_residential(call, state, PRODUCT_RESIDENTIAL2, service)
 
 
 @router.callback_query(F.data == "buy:v2ray")
-async def buy_v2ray(call: CallbackQuery) -> None:
+async def buy_v2ray(call: CallbackQuery, service: Service) -> None:
     await call.answer()
+    if not service.product_enabled("v2ray"):
+        await call.message.answer("🛡 محصول V2Ray در حال حاضر غیرفعال است.")
+        return
     await call.message.answer(
         "🛡 <b>کانفیگ V2Ray (عادی)</b>\n\n"
         "این بخش به‌زودی فعال می‌شود. 🚧\n"
@@ -115,11 +146,16 @@ async def order_country_text(message: Message, state: FSMContext, service: Servi
 
 
 # ---------------------------------------------------------------------- #
-#  انتخاب استان (state) از لیست
+#  انتخاب استان (state) از لیست — فقط رزیدنتال ۱
 # ---------------------------------------------------------------------- #
 async def _ask_state(message: Message, state: FSMContext, service: Service) -> None:
     data = await state.get_data()
     area = data.get("area", "")
+    # رزیدنتال ۲ (IPRoyal) لایه‌ی استان ندارد؛ مستقیم به انتخاب شهر می‌رود
+    if _is_res2(data):
+        await state.update_data(state="")
+        await _ask_city(message, state, service)
+        return
     if locations.has_states(area):
         await state.set_state(OrderStates.choosing_state)
         await message.answer(
@@ -147,11 +183,15 @@ async def _ask_city(message: Message, state: FSMContext, service: Service) -> No
     data = await state.get_data()
     area = data.get("area", "")
     st = data.get("state", "")
-    city_list = locations.cities(area, st) if st else []
+    if _is_res2(data):
+        city_list = iproyal_locations.cities(area) if area else []
+    else:
+        city_list = locations.cities(area, st) if st else []
     if city_list:
         await state.set_state(OrderStates.choosing_city)
+        loc_label = countries.display_name(area) if _is_res2(data) else locations.prettify(st)
         await message.answer(
-            f"🏙 شهر موردنظر در {locations.prettify(st)} را انتخاب کنید:",
+            f"🏙 شهر موردنظر در {loc_label} را انتخاب کنید:",
             reply_markup=options_keyboard("ord_city", city_list),
         )
     else:
@@ -172,12 +212,21 @@ async def order_city(call: CallbackQuery, state: FSMContext, service: Service) -
 #  انتخاب زمان تعویض IP (life)
 # ---------------------------------------------------------------------- #
 async def _ask_life(message: Message, state: FSMContext, service: Service) -> None:
+    data = await state.get_data()
     await state.set_state(OrderStates.choosing_life)
-    await message.answer(
-        "⏱ هر چند وقت یک‌بار IP خودکار عوض شود؟\n"
-        "(می‌توانید «بدون تعویض خودکار» یا یک مقدار دلخواه بین ۱ تا ۱۴۴۰ دقیقه انتخاب کنید)",
-        reply_markup=life_keyboard("ord_life"),
-    )
+    if _is_res2(data):
+        max_h = _max_life(PRODUCT_RESIDENTIAL2) // 60
+        await message.answer(
+            "⏱ هر چند وقت یک‌بار IP خودکار عوض شود؟\n"
+            f"(«بدون تعویض خودکار» یا مقداری بین ۱ تا {max_h*60} دقیقه — حداکثر ۷ روز)",
+            reply_markup=life_keyboard("ord_life", presets=LIFE_PRESETS_RES2),
+        )
+    else:
+        await message.answer(
+            "⏱ هر چند وقت یک‌بار IP خودکار عوض شود؟\n"
+            "(می‌توانید «بدون تعویض خودکار» یا یک مقدار دلخواه بین ۱ تا ۱۴۴۰ دقیقه انتخاب کنید)",
+            reply_markup=life_keyboard("ord_life"),
+        )
 
 
 @router.callback_query(OrderStates.choosing_life, F.data.startswith("ord_life:"))
@@ -186,7 +235,9 @@ async def order_life(call: CallbackQuery, state: FSMContext, service: Service) -
     await call.answer()
     if value == "__custom__":
         await state.set_state(OrderStates.entering_life)
-        await call.message.answer("عدد دلخواه را بفرستید (دقیقه، بین ۱ تا ۱۴۴۰):")
+        data = await state.get_data()
+        max_min = _max_life(data.get("product", PRODUCT_RESIDENTIAL))
+        await call.message.answer(f"عدد دلخواه را بفرستید (دقیقه، بین ۱ تا {max_min}):")
         return
     try:
         life = int(value)
@@ -198,9 +249,11 @@ async def order_life(call: CallbackQuery, state: FSMContext, service: Service) -
 
 @router.message(OrderStates.entering_life)
 async def order_life_text(message: Message, state: FSMContext, service: Service) -> None:
+    data = await state.get_data()
+    max_min = _max_life(data.get("product", PRODUCT_RESIDENTIAL))
     text = (message.text or "").strip()
-    if not text.isdigit() or not (1 <= int(text) <= 1440):
-        await message.answer("⛔️ یک عدد بین ۱ تا ۱۴۴۰ بفرستید:")
+    if not text.isdigit() or not (1 <= int(text) <= max_min):
+        await message.answer(f"⛔️ یک عدد بین ۱ تا {max_min} بفرستید:")
         return
     await state.update_data(life=int(text))
     await _ask_volume(message, state, service)
@@ -245,6 +298,7 @@ async def order_volume(message: Message, state: FSMContext, service: Service, ro
     loc_txt = _loc_text(data)
     life = data.get("life", None)
     life_txt = "بدون تعویض خودکار" if not life else f"هر {life} دقیقه"
+    product_txt = "رزیدنتال ۲" if product == PRODUCT_RESIDENTIAL2 else "رزیدنتال"
 
     if payer == "postpaid":
         pay_line = "💳 پرداخت: <b>پس‌پرداخت</b> (تسویه با ادمین)"
@@ -258,6 +312,7 @@ async def order_volume(message: Message, state: FSMContext, service: Service, ro
 
     await message.answer(
         "🧾 <b>خلاصه‌ی سفارش</b>\n\n"
+        f"🧩 محصول: <b>{product_txt}</b>\n"
         f"🌍 لوکیشن: {loc_txt}\n"
         f"⏱ تعویض IP: {life_txt}\n"
         f"📦 حجم: <b>{volume} GB</b>\n"
@@ -293,6 +348,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
     )
     life = data.get("life", None)
     payer = service._payer_for(role, product)
+    product_txt = "رزیدنتال ۲" if product == PRODUCT_RESIDENTIAL2 else "رزیدنتال"
 
     # کاربر عادی غیرهمکار: پرداخت آنلاین (اول پرداخت، بعد ساخت خودکار)
     if payer == "nowpayments":
@@ -301,7 +357,9 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
             return
         wait = await call.message.answer("⏳ در حال ساخت لینک پرداخت...")
         try:
-            info = await service.create_residential_order(call.from_user.id, location, volume, life)
+            info = await service.create_residential_order(
+                call.from_user.id, location, volume, life, product=product
+            )
         except ValueError as exc:
             await wait.edit_text(f"⛔️ {exc}")
             return
@@ -313,7 +371,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
             inline_keyboard=[[InlineKeyboardButton(text="💳 پرداخت با USDT (TRC20)", url=info["invoice_url"])]]
         )
         await wait.edit_text(
-            f"🧾 فاکتور سرویس رزیدنتال <b>{volume} GB</b> ساخته شد.\n"
+            f"🧾 فاکتور سرویس {product_txt} <b>{volume} GB</b> ساخته شد.\n"
             f"≈ <b>{info['usd_amount']:g} USDT</b> (شبکه ترون / TRC20)\n\n"
             "پس از پرداخت، سرویس به‌صورت خودکار ساخته و لینک‌ها برایتان ارسال می‌شود.",
             reply_markup=kb,
@@ -323,7 +381,9 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
     # ادمین (رایگان) یا همکار رزیدنتال (پس‌پرداخت): ساخت فوری
     wait = await call.message.answer("⏳ در حال ساخت سرویس... لطفاً چند لحظه صبر کنید.")
     try:
-        result = await service.purchase_residential(call.from_user.id, role, location, volume, life)
+        result = await service.purchase_residential(
+            call.from_user.id, role, location, volume, life, product=product
+        )
     except ValueError as exc:
         await wait.edit_text(f"⛔️ {exc}")
         return
@@ -344,6 +404,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
             await call.bot.send_message(
                 cfg.admin_id,
                 "🛒 <b>سفارش جدید</b>\n"
+                f"🧩 محصول: <b>{product_txt}</b>\n"
                 f"👤 کاربر: {uname} (<code>{u.id}</code>)\n"
                 f"📦 حجم: <b>{result.volume_gb} GB</b>\n"
                 f"💵 مبلغ: <b>{result.price:g} {cur}</b> ({pay_note})\n"
