@@ -21,6 +21,7 @@ class ConfigStates(StatesGroup):
     """ویرایش مقادیر یک کانفیگ موجود."""
     entering_life = State()
     entering_renew_volume = State()  # حجم تمدید
+    entering_customer_id = State()   # آیدی عددی مشتری برای ربات کمکی
 
 
 class ChangeLocationStates(StatesGroup):
@@ -51,10 +52,16 @@ class AdminStates(StatesGroup):
     set_renew_min_volume = State()
     set_price = State()
     set_reseller_price = State()
+    set_residential2_price = State()
+    set_residential2_reseller_price = State()
     set_v2ray_price = State()
     set_v2ray_reseller_price = State()
     set_reseller_min_balance = State()
     set_toman_rate = State()
+    set_iproyal_host = State()
+    set_iproyal_port = State()
+    set_iproyal_username = State()
+    set_iproyal_password = State()
     setrole_id = State()
     credit_id = State()
     credit_amount = State()

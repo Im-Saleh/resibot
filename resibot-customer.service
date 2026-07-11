@@ -1,0 +1,17 @@
+[Unit]
+Description=resibot-customer - Telegram helper bot for customers (change IP / check settings)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/.venv/bin/python -m customerbot
+Restart=always
+RestartSec=5
+# لاگ‌ها در journald
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

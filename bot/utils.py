@@ -53,9 +53,22 @@ def life_str(minutes) -> str:
     return f"هر {m} دقیقه"
 
 
+_PRODUCT_LABEL = {
+    "residential": "رزیدنتال",
+    "residential2": "رزیدنتال ۲",
+    "v2ray": "V2Ray",
+}
+
+
+def product_label(product: str) -> str:
+    return _PRODUCT_LABEL.get(product or "residential", product or "رزیدنتال")
+
+
 def config_summary(row: sqlite3.Row, *, show_owner: bool = False) -> str:
+    product = (row["product_type"] if "product_type" in row.keys() else "residential") or "residential"
     lines = [
         f"🆔 کانفیگ <code>#{row['id']}</code>",
+        f"🧩 محصول: <b>{product_label(product)}</b>",
         f"📦 حجم: <b>{row['volume_gb']} GB</b>",
         f"⏳ انقضا: {fmt_expiry(row['expiry_ms'])} ({days_left(row['expiry_ms'])} روز)",
         f"🌍 لوکیشن: {escape(location_str(row))}",
@@ -64,6 +77,12 @@ def config_summary(row: sqlite3.Row, *, show_owner: bool = False) -> str:
     ]
     if show_owner:
         lines.append(f"👤 مالک: <code>{row['owner_tg_id']}</code>")
+    try:
+        customer_id = int(row["customer_tg_id"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        customer_id = 0
+    if customer_id:
+        lines.append(f"🤖 مشتری ربات کمکی: <code>{customer_id}</code>")
     return "\n".join(lines)
 
 

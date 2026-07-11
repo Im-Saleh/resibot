@@ -9,10 +9,11 @@ from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from .. import countries, locations
+from .. import countries, iproyal_locations, locations
 from ..config import Settings
 from ..database import Database
 from ..keyboards import (
+    LIFE_PRESETS_RES2,
     config_actions,
     configs_list_keyboard,
     confirm_delete,
@@ -429,10 +430,12 @@ async def life_pick(call: CallbackQuery, db: Database, cfg: Settings) -> None:
         return
     current = int(row["life"] or 0)
     cur_txt = "بدون تعویض خودکار" if current <= 0 else f"هر {current} دقیقه"
+    product = row["product_type"] or "residential"
+    presets = LIFE_PRESETS_RES2 if product == "residential2" else None
     await call.answer()
     await call.message.answer(
         f"⏱ زمان تعویض خودکار IP (فعلی: <b>{cur_txt}</b>) را انتخاب کنید:",
-        reply_markup=life_keyboard(f"sl:{config_id}"),
+        reply_markup=life_keyboard(f"sl:{config_id}", presets=presets),
     )
 
 
@@ -463,14 +466,17 @@ async def life_set(call: CallbackQuery, state: FSMContext, service: Service, db:
 
 
 @router.message(ConfigStates.entering_life)
-async def life_custom(message: Message, state: FSMContext, service: Service) -> None:
-    text = (message.text or "").strip()
-    if not text.isdigit() or not (1 <= int(text) <= 1440):
-        await message.answer("⛔️ یک عدد بین ۱ تا ۱۴۴۰ بفرستید:")
-        return
+async def life_custom(message: Message, state: FSMContext, service: Service, db: Database, cfg: Settings) -> None:
     data = await state.get_data()
-    await state.clear()
     config_id = int(data.get("config_id", 0))
+    row = _access_or_none(config_id, message.from_user.id, cfg, db)
+    product = (row["product_type"] if row else "residential") or "residential"
+    max_min = Service.max_life_for(product)
+    text = (message.text or "").strip()
+    if not text.isdigit() or not (1 <= int(text) <= max_min):
+        await message.answer(f"⛔️ یک عدد بین ۱ تا {max_min} بفرستید:")
+        return
+    await state.clear()
     msg = await message.answer("⏳ در حال تنظیم زمان تعویض IP...")
     try:
         life = await service.set_life(config_id, int(text))
@@ -479,6 +485,73 @@ async def life_custom(message: Message, state: FSMContext, service: Service) -> 
         await msg.edit_text(f"❌ خطا:\n<code>{exc}</code>")
         return
     await msg.edit_text(f"✅ زمان تعویض IP تنظیم شد: هر <b>{life}</b> دقیقه")
+
+
+# ====================================================================== #
+#  تعیین مشتری برای ربات کمکی (تغییر IP توسط خود مشتری)
+# ====================================================================== #
+@router.callback_query(F.data.startswith("cfg_cust:"))
+async def customer_pick(call: CallbackQuery, state: FSMContext, db: Database, cfg: Settings) -> None:
+    config_id = int(call.data.split(":", 1)[1])
+    row = _access_or_none(config_id, call.from_user.id, cfg, db)
+    if not row:
+        await call.answer("دسترسی ندارید یا کانفیگ یافت نشد.", show_alert=True)
+        return
+    await call.answer()
+    try:
+        current = int(row["customer_tg_id"] or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        current = 0
+    current_txt = f"<code>{current}</code>" if current else "تعیین نشده"
+    await state.set_state(ConfigStates.entering_customer_id)
+    await state.update_data(config_id=config_id)
+    await call.message.answer(
+        "🤖 <b>تعیین مشتری برای ربات کمکی</b>\n\n"
+        "با این کار، مشتری می‌تواند با استارت‌کردن «ربات کمکی»، فقط همین "
+        "سرویس (کانفیگ) را ببیند و خودش IP آن را تغییر دهد و تنظیمات را "
+        "بررسی کند — بدون نیاز به دسترسی به این ربات اصلی.\n\n"
+        f"👤 مشتری فعلی این سرویس: {current_txt}\n\n"
+        "آیدی عددی تلگرام مشتری را بفرستید.\n"
+        "برای حذف دسترسی، عدد <code>0</code> را بفرستید."
+    )
+
+
+@router.message(ConfigStates.entering_customer_id)
+async def customer_set(message: Message, state: FSMContext, db: Database, cfg: Settings) -> None:
+    text = (message.text or "").strip()
+    if not text.lstrip("-").isdigit():
+        await message.answer("⛔️ آیدی باید عددی باشد (یا 0 برای حذف). دوباره بفرستید:")
+        return
+    data = await state.get_data()
+    await state.clear()
+    config_id = int(data.get("config_id", 0))
+    row = _access_or_none(config_id, message.from_user.id, cfg, db)
+    if not row:
+        await message.answer("⛔️ دسترسی ندارید یا کانفیگ یافت نشد.")
+        return
+    customer_id = int(text)
+    if customer_id < 0:
+        await message.answer("⛔️ آیدی نمی‌تواند منفی باشد.")
+        return
+    db.set_config_customer(config_id, customer_id)
+    if customer_id:
+        await message.answer(
+            f"✅ از این پس مشتری <code>{customer_id}</code> می‌تواند با استارت‌کردن "
+            f"ربات کمکی، سرویس <code>#{config_id}</code> را مدیریت کند "
+            "(تغییر IP و بررسی تنظیمات)."
+        )
+        try:
+            await message.bot.send_message(
+                customer_id,
+                "🎉 یک سرویس برای شما در ربات کمکی فعال شد!\n"
+                "برای مشاهده و تغییر IP، ربات کمکی را استارت کنید (/start).",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("notify assigned customer failed for config %s", config_id)
+    else:
+        await message.answer(
+            f"✅ دسترسی ربات کمکی برای سرویس <code>#{config_id}</code> حذف شد."
+        )
 
 
 # ====================================================================== #
@@ -494,11 +567,13 @@ async def country_start(call: CallbackQuery, state: FSMContext, db: Database, cf
     await call.answer()
     await state.clear()
     await state.set_state(ChangeLocationStates.choosing_country)
-    await state.update_data(config_id=config_id)
-    await call.message.answer(
-        "🌍 کشور جدید را انتخاب کنید:",
-        reply_markup=country_keyboard("loc_country"),
-    )
+    product = row["product_type"] or "residential"
+    await state.update_data(config_id=config_id, product=product)
+    if product == "residential2":
+        kb = country_keyboard("loc_country", popular=iproyal_locations.popular())
+    else:
+        kb = country_keyboard("loc_country")
+    await call.message.answer("🌍 کشور جدید را انتخاب کنید:", reply_markup=kb)
 
 
 @router.callback_query(
@@ -546,6 +621,11 @@ async def loc_country_text(message: Message, state: FSMContext, service: Service
 async def _loc_ask_state(message: Message, state: FSMContext, service: Service) -> None:
     data = await state.get_data()
     area = data.get("area", "")
+    # رزیدنتال ۲ (IPRoyal) لایه‌ی استان ندارد؛ مستقیم به انتخاب شهر می‌رود
+    if data.get("product") == "residential2":
+        await state.update_data(state="")
+        await _loc_ask_city(message, state, service)
+        return
     if locations.has_states(area):
         await state.set_state(ChangeLocationStates.choosing_state)
         await message.answer(
@@ -570,11 +650,16 @@ async def _loc_ask_city(message: Message, state: FSMContext, service: Service) -
     data = await state.get_data()
     area = data.get("area", "")
     st = data.get("state", "")
-    city_list = locations.cities(area, st) if st else []
+    if data.get("product") == "residential2":
+        city_list = iproyal_locations.cities(area) if area else []
+        loc_label = countries.display_name(area)
+    else:
+        city_list = locations.cities(area, st) if st else []
+        loc_label = locations.prettify(st)
     if city_list:
         await state.set_state(ChangeLocationStates.choosing_city)
         await message.answer(
-            f"🏙 شهر موردنظر در {locations.prettify(st)} را انتخاب کنید:",
+            f"🏙 شهر موردنظر در {loc_label} را انتخاب کنید:",
             reply_markup=options_keyboard("loc_city", city_list),
         )
     else:

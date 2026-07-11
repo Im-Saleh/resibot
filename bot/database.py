@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -27,7 +27,8 @@ ROLE_V2RAY_RESELLER = "v2ray_reseller"
 ROLE_USER = "user"
 
 # انواع محصول
-PRODUCT_RESIDENTIAL = "residential"
+PRODUCT_RESIDENTIAL = "residential"       # رزیدنتال (SmartProxy)
+PRODUCT_RESIDENTIAL2 = "residential2"     # رزیدنتال ۲ (IPRoyal)
 PRODUCT_V2RAY = "v2ray"
 
 
@@ -57,6 +58,8 @@ class Database:
                 self._migrate_v2()
             if current < 3:
                 self._migrate_v3()
+            if current < 4:
+                self._migrate_v4()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -177,6 +180,23 @@ class Database:
             self._conn.execute("ALTER TABLE payments ADD COLUMN meta TEXT DEFAULT ''")
         self._conn.commit()
 
+    def _migrate_v4(self) -> None:
+        """افزودن ستون customer_tg_id به configs.
+
+        این ستون برای ربات کمکی مشتری استفاده می‌شود: همکار/مالک کانفیگ
+        می‌تواند از داخل «مدیریت سرویس» تعیین کند کدام مشتری (با آیدی عددی
+        تلگرام) اجازه دارد IP و تنظیمات همین کانفیگ مشخص را از طریق ربات
+        کمکی مدیریت کند. 0 یعنی هنوز مشتری‌ای تعیین نشده.
+        """
+        if not self._column_exists("configs", "customer_tg_id"):
+            self._conn.execute(
+                "ALTER TABLE configs ADD COLUMN customer_tg_id INTEGER NOT NULL DEFAULT 0"
+            )
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_configs_customer ON configs(customer_tg_id)"
+        )
+        self._conn.commit()
+
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
             cur = self._conn.execute(sql, tuple(params))
@@ -243,8 +263,9 @@ class Database:
             "sub_id", "outbound_tag", "inbound_tag", "volume_gb", "duration_days",
             "expiry_ms", "area", "state", "city", "life", "session",
             "created_at", "active", "product_type", "price", "payer",
+            "customer_tg_id",
         )
-        values = [data.get(c) for c in cols]
+        values = [data.get(c, 0) if c == "customer_tg_id" else data.get(c) for c in cols]
         placeholders = ", ".join("?" for _ in cols)
         with self._lock:
             cur = self._conn.execute(
@@ -266,6 +287,32 @@ class Database:
 
     def list_all_configs(self) -> list[sqlite3.Row]:
         return self.query_all("SELECT * FROM configs WHERE active = 1 ORDER BY created_at DESC")
+
+    def set_config_customer(self, config_id: int, customer_tg_id: int) -> None:
+        """تعیین یا حذف مشتریِ مجاز برای مدیریت IP این کانفیگ مشخص.
+
+        customer_tg_id=0 یعنی هیچ مشتری‌ای تعیین نشده (دسترسی ربات کمکی
+        برای این کانفیگ غیرفعال است).
+        """
+        self.execute(
+            "UPDATE configs SET customer_tg_id = ? WHERE id = ?",
+            (int(customer_tg_id), config_id),
+        )
+
+    def list_configs_by_customer(self, customer_tg_id: int) -> list[sqlite3.Row]:
+        """کانفیگ‌های فعالی که توسط مالک/همکار به این مشتری سپرده شده‌اند."""
+        return self.query_all(
+            "SELECT * FROM configs WHERE customer_tg_id = ? AND active = 1 "
+            "ORDER BY created_at DESC",
+            (int(customer_tg_id),),
+        )
+
+    def get_config_for_customer(self, config_id: int, customer_tg_id: int) -> Optional[sqlite3.Row]:
+        """یک کانفیگ مشخص را فقط اگر متعلق به این مشتری باشد برمی‌گرداند."""
+        return self.query_one(
+            "SELECT * FROM configs WHERE id = ? AND customer_tg_id = ? AND active = 1",
+            (config_id, int(customer_tg_id)),
+        )
 
     def update_config_location(
         self,

@@ -249,3 +249,207 @@ def test_migration_preserves_and_adds():
     svc, db = _make_service()
     db.set_role(999, ROLE_RESIDENTIAL_RESELLER)
     assert db.get_role(999) == ROLE_RESIDENTIAL_RESELLER
+
+
+
+# --------------------------- IPRoyal (رزیدنتال ۲) ---------------------- #
+from bot.proxy import IPROYAL_MAX_LIFE_MIN, build_iproyal_password, _iproyal_lifetime
+
+
+def test_iproyal_password_matches_example():
+    # نمونه‌ی رسمی: x1NFN2nK3r2w2umj_country-gb_session-YkaWtTRI_lifetime-168h
+    loc = ProxyLocation(area="GB", session="YkaWtTRI", life=168 * 60)
+    pw = build_iproyal_password("x1NFN2nK3r2w2umj", loc)
+    assert pw == "x1NFN2nK3r2w2umj_country-gb_session-YkaWtTRI_lifetime-168h"
+
+
+def test_iproyal_password_lowercases_country_and_city():
+    loc = ProxyLocation(area="US", city="NewYork", session="abcd1234")
+    pw = build_iproyal_password("base", loc)
+    assert pw == "base_country-us_city-newyork_session-abcd1234"
+
+
+def test_iproyal_password_minimal():
+    assert build_iproyal_password("base", ProxyLocation(session="zzzz")) == "base_session-zzzz"
+
+
+def test_iproyal_lifetime_units():
+    assert _iproyal_lifetime(60) == "lifetime-1h"
+    assert _iproyal_lifetime(90) == "lifetime-90m"
+    assert _iproyal_lifetime(1440) == "lifetime-24h"
+    # سقف ۷ روز
+    assert _iproyal_lifetime(999999) == f"lifetime-{IPROYAL_MAX_LIFE_MIN // 60}h"
+
+
+def test_iproyal_lifetime_max_is_7_days():
+    assert IPROYAL_MAX_LIFE_MIN == 7 * 24 * 60
+
+
+# --------------------------- residential2 pricing / life --------------- #
+from bot.database import PRODUCT_RESIDENTIAL2
+
+
+def test_residential2_price_tiers():
+    svc, _ = _make_service()
+    svc.set_setting("residential2_price_per_gb", "12")
+    svc.set_setting("residential2_reseller_price_per_gb", "9")
+    assert svc.price_per_gb_for(ROLE_USER, PRODUCT_RESIDENTIAL2) == 12.0
+    assert svc.price_per_gb_for(ROLE_RESIDENTIAL_RESELLER, PRODUCT_RESIDENTIAL2) == 9.0
+    # رزیدنتال ۲ واحدش دلار است (مثل رزیدنتال)
+    assert svc.product_currency(PRODUCT_RESIDENTIAL2) == svc.residential_currency
+
+
+def test_residential2_payer_like_residential():
+    assert Service._payer_for(ROLE_ADMIN, PRODUCT_RESIDENTIAL2) == "admin"
+    assert Service._payer_for(ROLE_RESIDENTIAL_RESELLER, PRODUCT_RESIDENTIAL2) == "postpaid"
+    assert Service._payer_for(ROLE_USER, PRODUCT_RESIDENTIAL2) == "nowpayments"
+
+
+def test_max_life_and_clamp_per_product():
+    assert Service.max_life_for(PRODUCT_RESIDENTIAL) == 1440
+    assert Service.max_life_for(PRODUCT_RESIDENTIAL2) == IPROYAL_MAX_LIFE_MIN
+    # کلمپ محصول‌محور
+    assert Service._clamp_life(99999, PRODUCT_RESIDENTIAL) == 1440
+    assert Service._clamp_life(99999, PRODUCT_RESIDENTIAL2) == IPROYAL_MAX_LIFE_MIN
+    assert Service._clamp_life(0, PRODUCT_RESIDENTIAL2) == 0
+
+
+# --------------------------- feature toggles --------------------------- #
+from bot.service import (
+    S_SHOW_PARTNERSHIP,
+    S_SHOW_RESIDENTIAL2,
+    S_SHOW_V2RAY,
+)
+
+
+def test_feature_toggle_roundtrip():
+    svc, _ = _make_service()
+    # مقدار پیش‌فرض فعال است
+    assert svc.feature_enabled(S_SHOW_PARTNERSHIP) is True
+    # خاموش کردن
+    assert svc.toggle_feature(S_SHOW_PARTNERSHIP) is False
+    assert svc.feature_enabled(S_SHOW_PARTNERSHIP) is False
+    # روشن کردن دوباره
+    assert svc.toggle_feature(S_SHOW_PARTNERSHIP) is True
+    assert svc.feature_enabled(S_SHOW_PARTNERSHIP) is True
+
+
+def test_product_enabled_reflects_toggle():
+    svc, _ = _make_service()
+    assert svc.product_enabled(PRODUCT_RESIDENTIAL2) is True
+    svc.toggle_feature(S_SHOW_RESIDENTIAL2)
+    assert svc.product_enabled(PRODUCT_RESIDENTIAL2) is False
+    svc.toggle_feature(S_SHOW_V2RAY)
+    assert svc.product_enabled("v2ray") is False
+
+
+def test_products_menu_hides_disabled():
+    from bot.keyboards import products_menu
+    kb = products_menu(residential=True, residential2=False, v2ray=False)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "buy:residential" in cbs
+    assert "buy:residential2" not in cbs
+    assert "buy:v2ray" not in cbs
+
+
+def test_main_menu_hides_partnership():
+    from bot.keyboards import main_menu
+    kb = main_menu(show_partnership=False)
+    texts = [b.text for row in kb.keyboard for b in row]
+    assert "🤝 همکاری" not in texts
+    kb2 = main_menu(show_partnership=True)
+    texts2 = [b.text for row in kb2.keyboard for b in row]
+    assert "🤝 همکاری" in texts2
+
+
+# --------------------------- customer bot ------------------------------ #
+from customerbot.middlewares import CustomerContextMiddleware
+from customerbot.handlers.services import _get_customer_config
+
+
+class _FakeUser:
+    def __init__(self, uid: int) -> None:
+        self.id = uid
+
+
+def _make_config_row(db, owner_tg_id: int = 1001, customer_tg_id: int = 0, product: str = "residential"):
+    return db.add_config({
+        "owner_tg_id": owner_tg_id, "inbound_id": 1, "port": 10001,
+        "client_uuid": "u1", "client_email": "e1", "sub_id": "s1",
+        "outbound_tag": "out1", "inbound_tag": "in1", "volume_gb": 10,
+        "duration_days": 30, "expiry_ms": 0, "area": "US", "state": "",
+        "city": "", "life": 0, "session": "abc123", "created_at": 0,
+        "active": 1, "product_type": product, "price": 0, "payer": "self",
+        "customer_tg_id": customer_tg_id,
+    })
+
+
+def test_set_config_customer_roundtrip():
+    svc, db = _make_service()
+    cfg_id = _make_config_row(db, owner_tg_id=1001)
+    row = db.get_config(cfg_id)
+    assert int(row["customer_tg_id"] or 0) == 0
+    db.set_config_customer(cfg_id, 555)
+    assert int(db.get_config(cfg_id)["customer_tg_id"]) == 555
+    db.set_config_customer(cfg_id, 0)
+    assert int(db.get_config(cfg_id)["customer_tg_id"]) == 0
+
+
+def test_list_configs_by_customer_is_per_order():
+    svc, db = _make_service()
+    cfg1 = _make_config_row(db, owner_tg_id=1001)
+    cfg2 = _make_config_row(db, owner_tg_id=2002)
+    cfg3 = _make_config_row(db, owner_tg_id=1001)
+    db.set_config_customer(cfg1, 555)
+    db.set_config_customer(cfg2, 555)
+    db.set_config_customer(cfg3, 999)
+    assert {r["id"] for r in db.list_configs_by_customer(555)} == {cfg1, cfg2}
+    assert {r["id"] for r in db.list_configs_by_customer(999)} == {cfg3}
+    assert db.list_configs_by_customer(123456) == []
+
+
+def test_get_config_for_customer_enforces_ownership():
+    svc, db = _make_service()
+    cfg_id = _make_config_row(db, owner_tg_id=1001)
+    db.set_config_customer(cfg_id, 555)
+    assert db.get_config_for_customer(cfg_id, 555)["id"] == cfg_id
+    assert db.get_config_for_customer(cfg_id, 999) is None
+    assert db.get_config_for_customer(999999, 555) is None
+    # حتی owner هم بدون تعیین‌شدن به‌عنوان مشتری دسترسی ندارد
+    assert _get_customer_config(cfg_id, 1001, db) is None
+
+
+def test_customer_bot_middleware_allows_any_user():
+    import asyncio as _asyncio
+
+    mw = CustomerContextMiddleware()
+    calls = []
+
+    async def handler(event, data):
+        calls.append(data.get("customer_id"))
+        return "ok"
+
+    async def _run():
+        assert await mw(handler, object(), {"event_from_user": _FakeUser(555)}) == "ok"
+        assert await mw(handler, object(), {}) is None
+
+    _asyncio.run(_run())
+    assert calls == [555]
+
+
+def test_config_summary_shows_product_and_customer():
+    from bot.utils import config_summary
+    svc, db = _make_service()
+    cfg_id = _make_config_row(db, owner_tg_id=1001, customer_tg_id=555, product="residential2")
+    text = config_summary(db.get_config(cfg_id), show_owner=True)
+    assert "رزیدنتال ۲" in text
+    assert "555" in text
+
+
+def test_customer_service_actions_has_loc_and_life_buttons():
+    from customerbot.keyboards import service_actions
+    kb = service_actions(config_id=42)
+    cbs = [b.callback_data for row in kb.inline_keyboard for b in row]
+    assert "cs_loc:42" in cbs
+    assert "cs_life:42" in cbs
+    assert "cs_ip:42" in cbs

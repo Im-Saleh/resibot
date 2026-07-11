@@ -82,12 +82,21 @@ class Settings:
     port_range_min: int = field(default_factory=lambda: _get_int("PORT_RANGE_MIN", 10000))
     port_range_max: int = field(default_factory=lambda: _get_int("PORT_RANGE_MAX", 60000))
 
-    # SmartProxy
+    # SmartProxy (رزیدنتال ۱)
     smartproxy_host: str = field(default_factory=lambda: _get("SMARTPROXY_HOST", "proxy.smartproxy.net"))
     smartproxy_port: int = field(default_factory=lambda: _get_int("SMARTPROXY_PORT", 3120))
     smartproxy_user_base: str = field(default_factory=lambda: _get("SMARTPROXY_USER_BASE"))
     smartproxy_password: str = field(default_factory=lambda: _get("SMARTPROXY_PASSWORD"))
     smartproxy_life: int = field(default_factory=lambda: _get_int("SMARTPROXY_LIFE", 120))
+
+    # IPRoyal (رزیدنتال ۲) — پارامترهای لوکیشن/سشن داخل رشته‌ی password کدگذاری می‌شوند
+    # نمونه‌ی password: x1NFN2nK3r2w2umj_country-gb_session-YkaWtTRI_lifetime-168h
+    iproyal_host: str = field(default_factory=lambda: _get("IPROYAL_HOST", "geo.iproyal.com"))
+    iproyal_port: int = field(default_factory=lambda: _get_int("IPROYAL_PORT", 12321))
+    iproyal_username: str = field(default_factory=lambda: _get("IPROYAL_USERNAME"))
+    iproyal_password: str = field(default_factory=lambda: _get("IPROYAL_PASSWORD"))
+    # مدت ماندگاری IP به دقیقه (1 تا 10080 = ۷ روز)
+    iproyal_life: int = field(default_factory=lambda: _get_int("IPROYAL_LIFE", 1440))
 
     # فالبک‌های اختیاری وقتی /panel/setting/all در دسترس نیست
     panel_cert_file: str = field(default_factory=lambda: _get("PANEL_CERT_FILE"))
@@ -109,8 +118,17 @@ class Settings:
     # رزیدنتال: واحد دلار | V2Ray عادی: واحد تومان
     price_per_gb: float = field(default_factory=lambda: _get_float("PRICE_PER_GB", 2.9))
     reseller_price_per_gb: float = field(default_factory=lambda: _get_float("RESELLER_PRICE_PER_GB", 2.0))
+    # رزیدنتال ۲ (IPRoyal) — واحد دلار
+    residential2_price_per_gb: float = field(default_factory=lambda: _get_float("RESIDENTIAL2_PRICE_PER_GB", 12.0))
+    residential2_reseller_price_per_gb: float = field(default_factory=lambda: _get_float("RESIDENTIAL2_RESELLER_PRICE_PER_GB", 10.0))
     v2ray_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_PRICE_PER_GB", 50000.0))
     v2ray_reseller_price_per_gb: float = field(default_factory=lambda: _get_float("V2RAY_RESELLER_PRICE_PER_GB", 35000.0))
+
+    # نمایش/مخفی‌سازی بخش‌ها (مقدار اولیه؛ در دیتابیس ماندگار می‌شود)
+    show_partnership: bool = field(default_factory=lambda: _get_bool("SHOW_PARTNERSHIP", True))
+    show_residential: bool = field(default_factory=lambda: _get_bool("SHOW_RESIDENTIAL", True))
+    show_residential2: bool = field(default_factory=lambda: _get_bool("SHOW_RESIDENTIAL2", True))
+    show_v2ray: bool = field(default_factory=lambda: _get_bool("SHOW_V2RAY", True))
 
     # حداقل موجودی لازم برای همکار v2ray (پیش‌پرداخت)
     reseller_min_balance: float = field(default_factory=lambda: _get_float("RESELLER_MIN_BALANCE", 5000000.0))

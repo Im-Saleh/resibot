@@ -112,10 +112,23 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask INBOUND_PATH "Path" "/get"
 
   echo
-  bold "— SmartProxy (اوتباند) —"
+  bold "— SmartProxy (اوتباند رزیدنتال) —"
   ask SMARTPROXY_USER_BASE "بخش پایه‌ی یوزرنیم (مثلاً smart-myrRsidFntpraGNS)"
   ask_secret SMARTPROXY_PASSWORD "پسورد SmartProxy"
   ask SMARTPROXY_LIFE "مدت ماندگاری IP به دقیقه (1..1440)" "120"
+
+  echo
+  bold "— IPRoyal (اوتباند رزیدنتال ۲) —"
+  ask IPROYAL_HOST "هاست IPRoyal" "geo.iproyal.com"
+  ask IPROYAL_PORT "پورت IPRoyal" "12321"
+  ask IPROYAL_USERNAME "یوزرنیم IPRoyal"
+  ask_secret IPROYAL_PASSWORD "پسورد پایه‌ی IPRoyal (بدون country/session/lifetime)"
+  ask IPROYAL_LIFE "مدت ماندگاری IP به دقیقه (1..10080 = ۷ روز)" "1440"
+
+  echo
+  bold "— ربات کمکی مشتری (اختیاری) —"
+  echo "اگر توکن ربات کمکی را بدهید، سرویس resibot-customer هم راه‌اندازی می‌شود."
+  ask CUSTOMER_BOT_TOKEN "توکن ربات کمکی مشتری (برای رد شدن خالی بگذارید)" ""
 
   echo
   bold "— قوانین فروش و قیمت‌ها —"
@@ -126,6 +139,8 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask TOMAN_PER_USD "نرخ هر دلار/تتر به تومان" "175000"
   ask PRICE_PER_GB "قیمت رزیدنتال عادی (هر گیگ)" "2.9"
   ask RESELLER_PRICE_PER_GB "قیمت رزیدنتال همکار (هر گیگ)" "2.0"
+  ask RESIDENTIAL2_PRICE_PER_GB "قیمت رزیدنتال ۲ عادی (هر گیگ، دلار)" "12"
+  ask RESIDENTIAL2_RESELLER_PRICE_PER_GB "قیمت رزیدنتال ۲ همکار (هر گیگ، دلار)" "10"
   ask V2RAY_PRICE_PER_GB "قیمت V2Ray عادی (هر گیگ)" "1.5"
   ask V2RAY_RESELLER_PRICE_PER_GB "قیمت V2Ray همکار (هر گیگ)" "1.0"
   ask RESELLER_MIN_BALANCE "حداقل موجودی همکار v2ray" "5000000"
@@ -175,6 +190,14 @@ SMARTPROXY_USER_BASE=${SMARTPROXY_USER_BASE}
 SMARTPROXY_PASSWORD=${SMARTPROXY_PASSWORD}
 SMARTPROXY_LIFE=${SMARTPROXY_LIFE}
 
+IPROYAL_HOST=${IPROYAL_HOST}
+IPROYAL_PORT=${IPROYAL_PORT}
+IPROYAL_USERNAME=${IPROYAL_USERNAME}
+IPROYAL_PASSWORD=${IPROYAL_PASSWORD}
+IPROYAL_LIFE=${IPROYAL_LIFE}
+
+CUSTOMER_BOT_TOKEN=${CUSTOMER_BOT_TOKEN}
+
 BRAND_NAME=w2f
 BRAND_FULL=Way To Freedom
 
@@ -186,9 +209,16 @@ WALLET_CURRENCY=${WALLET_CURRENCY}
 TOMAN_PER_USD=${TOMAN_PER_USD}
 PRICE_PER_GB=${PRICE_PER_GB}
 RESELLER_PRICE_PER_GB=${RESELLER_PRICE_PER_GB}
+RESIDENTIAL2_PRICE_PER_GB=${RESIDENTIAL2_PRICE_PER_GB}
+RESIDENTIAL2_RESELLER_PRICE_PER_GB=${RESIDENTIAL2_RESELLER_PRICE_PER_GB}
 V2RAY_PRICE_PER_GB=${V2RAY_PRICE_PER_GB}
 V2RAY_RESELLER_PRICE_PER_GB=${V2RAY_RESELLER_PRICE_PER_GB}
 RESELLER_MIN_BALANCE=${RESELLER_MIN_BALANCE}
+
+SHOW_PARTNERSHIP=1
+SHOW_RESIDENTIAL=1
+SHOW_RESIDENTIAL2=1
+SHOW_V2RAY=1
 
 NOWPAYMENTS_API_KEY=${NOWPAYMENTS_API_KEY}
 NOWPAYMENTS_IPN_SECRET=${NOWPAYMENTS_IPN_SECRET}
@@ -220,6 +250,23 @@ systemctl restart "$SERVICE_NAME"
 sleep 2
 bold "==> وضعیت سرویس:"
 systemctl --no-pager --lines=15 status "$SERVICE_NAME" || true
+
+# ---------------------------------------------------------------
+#  ربات کمکی مشتری (فقط اگر توکن آن در .env تنظیم شده باشد)
+# ---------------------------------------------------------------
+CUSTOMER_SERVICE_NAME="resibot-customer"
+if grep -qE "^CUSTOMER_BOT_TOKEN=.+" "$ENV_FILE" 2>/dev/null; then
+  bold "==> راه‌اندازی سرویس ربات کمکی مشتری"
+  CUSTOMER_SERVICE_PATH="/etc/systemd/system/${CUSTOMER_SERVICE_NAME}.service"
+  sed "s#__INSTALL_DIR__#${INSTALL_DIR}#g" "$INSTALL_DIR/resibot-customer.service" > "$CUSTOMER_SERVICE_PATH"
+  systemctl daemon-reload
+  systemctl enable "$CUSTOMER_SERVICE_NAME" >/dev/null 2>&1 || true
+  systemctl restart "$CUSTOMER_SERVICE_NAME"
+  sleep 2
+  systemctl --no-pager --lines=10 status "$CUSTOMER_SERVICE_NAME" || true
+else
+  green "توکن ربات کمکی مشتری تنظیم نشده؛ سرویس resibot-customer راه‌اندازی نشد."
+fi
 
 green ""
 green "✅ نصب کامل شد!"
