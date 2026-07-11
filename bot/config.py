@@ -89,12 +89,12 @@ class Settings:
     smartproxy_password: str = field(default_factory=lambda: _get("SMARTPROXY_PASSWORD"))
     smartproxy_life: int = field(default_factory=lambda: _get_int("SMARTPROXY_LIFE", 120))
 
-    # IPRoyal (رزیدنتال ۲) — پارامترهای لوکیشن/سشن داخل رشته‌ی password کدگذاری می‌شوند
-    # نمونه‌ی password: x1NFN2nK3r2w2umj_country-gb_session-YkaWtTRI_lifetime-168h
+    # اوتباند رزیدنتال ۲ — پارامترهای لوکیشن/سشن داخل رشته‌ی password کدگذاری می‌شوند
+    # مقادیر پیش‌فرض از قبل ست شده‌اند تا رزیدنتال ۲ بدون تنظیم اضافه کار کند.
     iproyal_host: str = field(default_factory=lambda: _get("IPROYAL_HOST", "geo.iproyal.com"))
     iproyal_port: int = field(default_factory=lambda: _get_int("IPROYAL_PORT", 12321))
-    iproyal_username: str = field(default_factory=lambda: _get("IPROYAL_USERNAME"))
-    iproyal_password: str = field(default_factory=lambda: _get("IPROYAL_PASSWORD"))
+    iproyal_username: str = field(default_factory=lambda: _get("IPROYAL_USERNAME", "zUulUCSUneWHTauW"))
+    iproyal_password: str = field(default_factory=lambda: _get("IPROYAL_PASSWORD", "x1NFN2nK3r2w2umj"))
     # مدت ماندگاری IP به دقیقه (1 تا 10080 = ۷ روز)
     iproyal_life: int = field(default_factory=lambda: _get_int("IPROYAL_LIFE", 1440))
 

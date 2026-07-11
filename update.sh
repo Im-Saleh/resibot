@@ -32,10 +32,23 @@ if [[ -f "data/resibot.db" ]]; then
   cp -f "data/resibot.db" "backups/resibot-$(date +%Y%m%d-%H%M%S).db"
 fi
 
-bold "==> دریافت آخرین کد (داده‌ها در data/ دست‌نخورده می‌مانند)"
-git stash push --include-untracked -m "resibot-auto-stash" >/dev/null 2>&1 || true
-git pull --ff-only
-git stash drop >/dev/null 2>&1 || true
+bold "==> دریافت آخرین کد (داده‌ها در data/ و .env دست‌نخورده می‌مانند)"
+# نکته‌ی مهم: ممکن است روی سرور فایل‌های ردیابی‌شده به‌صورت محلی تغییر کرده باشند
+# (مثلاً توسط اسکریپت‌های نصب ربات کمکی) یا فایل‌های ردیابی‌نشده‌ای مثل customerbot/
+# ساخته شده باشند. برای اینکه آپدیت هیچ‌وقت به خاطر تعارض گیر نکند، به‌جای
+# pull، به‌صورت اجباری با نسخه‌ی ریموت هم‌تراز می‌شویم.
+#  - .env و data/ و *.db و .venv/ در .gitignore هستند و لمس نمی‌شوند.
+#  - backups/ ردیابی‌نشده و خارج از مخزن است و حفظ می‌شود.
+CURRENT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+if [[ -z "$CURRENT_BRANCH" || "$CURRENT_BRANCH" == "HEAD" ]]; then
+  CURRENT_BRANCH="main"
+fi
+git fetch origin --prune
+# تلاش برای fast-forward ساده؛ اگر به خاطر تغییرات محلی نشد، reset اجباری
+if ! git merge --ff-only "origin/${CURRENT_BRANCH}" >/dev/null 2>&1; then
+  bold "   (تغییرات محلی شناسایی شد؛ هم‌ترازسازی اجباری با ریموت)"
+  git reset --hard "origin/${CURRENT_BRANCH}"
+fi
 
 bold "==> به‌روزرسانی وابستگی‌ها"
 if [[ ! -d ".venv" ]]; then

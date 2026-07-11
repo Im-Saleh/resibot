@@ -357,7 +357,7 @@ async def adm_settings(call: CallbackQuery, service: Service) -> None:
         f"• Host: <code>{escape(service.host)}</code>\n"
         f"• حداقل حجم خرید: <b>{service.min_volume_gb} GB</b>\n"
         f"• حداقل حجم تمدید: <b>{service.renew_min_volume_gb} GB</b>\n\n"
-        "🌍 <b>IPRoyal (رزیدنتال ۲)</b>\n"
+        "🌍 <b>سرور رزیدنتال ۲</b>\n"
         f"• هاست: <code>{escape(service.iproyal_host or '—')}</code>\n"
         f"• پورت: <code>{service.iproyal_port}</code>\n"
         f"• یوزرنیم: <code>{escape(service.iproyal_username or '—')}</code>\n"
@@ -382,10 +382,10 @@ _SETTING_PROMPTS = {
     "v2ray_reseller_price": (AdminStates.set_v2ray_reseller_price, "قیمت V2Ray همکار (هر گیگ) را بفرستید:"),
     "reseller_min_balance": (AdminStates.set_reseller_min_balance, "حداقل موجودی همکار v2ray را بفرستید:"),
     "toman_rate": (AdminStates.set_toman_rate, "نرخ هر دلار/تتر به تومان را بفرستید (مثلاً 175000):"),
-    "iproyal_host": (AdminStates.set_iproyal_host, "هاست IPRoyal را بفرستید (مثلاً geo.iproyal.com):"),
-    "iproyal_port": (AdminStates.set_iproyal_port, "پورت IPRoyal را بفرستید (مثلاً 12321):"),
-    "iproyal_username": (AdminStates.set_iproyal_username, "یوزرنیم IPRoyal را بفرستید:"),
-    "iproyal_password": (AdminStates.set_iproyal_password, "پسورد پایه‌ی IPRoyal را بفرستید (بدون country/session/lifetime):"),
+    "iproyal_host": (AdminStates.set_iproyal_host, "هاست سرور رزیدنتال ۲ را بفرستید:"),
+    "iproyal_port": (AdminStates.set_iproyal_port, "پورت سرور رزیدنتال ۲ را بفرستید:"),
+    "iproyal_username": (AdminStates.set_iproyal_username, "یوزرنیم سرور رزیدنتال ۲ را بفرستید:"),
+    "iproyal_password": (AdminStates.set_iproyal_password, "پسورد پایه‌ی سرور رزیدنتال ۲ را بفرستید:"),
 }
 
 
@@ -485,26 +485,26 @@ async def s_residential2_reseller_price(message: Message, state: FSMContext, ser
 async def s_iproyal_host(message: Message, state: FSMContext, service: Service) -> None:
     _save_text(service, S_IPROYAL_HOST, message.text or "")
     await state.clear()
-    await message.answer("✅ هاست IPRoyal به‌روزرسانی شد.")
+    await message.answer("✅ هاست رزیدنتال ۲ به‌روزرسانی شد.")
 
 
 @router.message(AdminStates.set_iproyal_port)
 async def s_iproyal_port(message: Message, state: FSMContext, service: Service) -> None:
-    await _save_int(message, state, service, S_IPROYAL_PORT, "پورت IPRoyal")
+    await _save_int(message, state, service, S_IPROYAL_PORT, "پورت رزیدنتال ۲")
 
 
 @router.message(AdminStates.set_iproyal_username)
 async def s_iproyal_username(message: Message, state: FSMContext, service: Service) -> None:
     _save_text(service, S_IPROYAL_USERNAME, message.text or "")
     await state.clear()
-    await message.answer("✅ یوزرنیم IPRoyal به‌روزرسانی شد.")
+    await message.answer("✅ یوزرنیم رزیدنتال ۲ به‌روزرسانی شد.")
 
 
 @router.message(AdminStates.set_iproyal_password)
 async def s_iproyal_password(message: Message, state: FSMContext, service: Service) -> None:
     _save_text(service, S_IPROYAL_PASSWORD, message.text or "")
     await state.clear()
-    await message.answer("✅ پسورد پایه‌ی IPRoyal به‌روزرسانی شد.")
+    await message.answer("✅ پسورد پایه‌ی رزیدنتال ۲ به‌روزرسانی شد.")
 
 
 @router.message(AdminStates.set_v2ray_price)
