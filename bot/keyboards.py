@@ -358,10 +358,10 @@ def settings_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📛 Host Header", callback_data="set:host")],
             [InlineKeyboardButton(text="📦 حداقل حجم خرید", callback_data="set:min_volume")],
             [InlineKeyboardButton(text="♻️ حداقل حجم تمدید", callback_data="set:renew_min_volume")],
-            [InlineKeyboardButton(text="🌍 IPRoyal — هاست", callback_data="set:iproyal_host")],
-            [InlineKeyboardButton(text="🌍 IPRoyal — پورت", callback_data="set:iproyal_port")],
-            [InlineKeyboardButton(text="🌍 IPRoyal — یوزرنیم", callback_data="set:iproyal_username")],
-            [InlineKeyboardButton(text="🌍 IPRoyal — پسورد", callback_data="set:iproyal_password")],
+            [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — هاست", callback_data="set:iproyal_host")],
+            [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — پورت", callback_data="set:iproyal_port")],
+            [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — یوزرنیم", callback_data="set:iproyal_username")],
+            [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — پسورد", callback_data="set:iproyal_password")],
         ]
     )
 

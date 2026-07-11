@@ -376,7 +376,7 @@ class Service:
         if product == PRODUCT_RESIDENTIAL2:
             if not (self.iproyal_username and self.iproyal_password and self.iproyal_host):
                 raise ValueError(
-                    "تنظیمات IPRoyal (رزیدنتال ۲) کامل نیست. ادمین باید یوزرنیم/پسورد/هاست را ست کند."
+                    "تنظیمات سرور رزیدنتال ۲ کامل نیست. لطفاً با پشتیبانی تماس بگیرید."
                 )
             password = build_iproyal_password(self.iproyal_password, loc)
             return xc.build_smartproxy_outbound(

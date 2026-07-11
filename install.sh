@@ -112,18 +112,13 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask INBOUND_PATH "Path" "/get"
 
   echo
-  bold "— SmartProxy (اوتباند رزیدنتال) —"
-  ask SMARTPROXY_USER_BASE "بخش پایه‌ی یوزرنیم (مثلاً smart-myrRsidFntpraGNS)"
-  ask_secret SMARTPROXY_PASSWORD "پسورد SmartProxy"
+  bold "— اوتباند رزیدنتال ۱ —"
+  ask SMARTPROXY_USER_BASE "بخش پایه‌ی یوزرنیم اوتباند رزیدنتال ۱"
+  ask_secret SMARTPROXY_PASSWORD "پسورد اوتباند رزیدنتال ۱"
   ask SMARTPROXY_LIFE "مدت ماندگاری IP به دقیقه (1..1440)" "120"
 
-  echo
-  bold "— IPRoyal (اوتباند رزیدنتال ۲) —"
-  ask IPROYAL_HOST "هاست IPRoyal" "geo.iproyal.com"
-  ask IPROYAL_PORT "پورت IPRoyal" "12321"
-  ask IPROYAL_USERNAME "یوزرنیم IPRoyal"
-  ask_secret IPROYAL_PASSWORD "پسورد پایه‌ی IPRoyal (بدون country/session/lifetime)"
-  ask IPROYAL_LIFE "مدت ماندگاری IP به دقیقه (1..10080 = ۷ روز)" "1440"
+  # اوتباند رزیدنتال ۲ — مقادیر پیش‌فرض از قبل در کد ست شده‌اند و نیازی به
+  # پرسش در نصب نیست (در صورت نیاز از پنل مدیریت قابل تغییر است).
 
   echo
   bold "— ربات کمکی مشتری (اختیاری) —"
@@ -190,11 +185,11 @@ SMARTPROXY_USER_BASE=${SMARTPROXY_USER_BASE}
 SMARTPROXY_PASSWORD=${SMARTPROXY_PASSWORD}
 SMARTPROXY_LIFE=${SMARTPROXY_LIFE}
 
-IPROYAL_HOST=${IPROYAL_HOST}
-IPROYAL_PORT=${IPROYAL_PORT}
-IPROYAL_USERNAME=${IPROYAL_USERNAME}
-IPROYAL_PASSWORD=${IPROYAL_PASSWORD}
-IPROYAL_LIFE=${IPROYAL_LIFE}
+IPROYAL_HOST=geo.iproyal.com
+IPROYAL_PORT=12321
+IPROYAL_USERNAME=zUulUCSUneWHTauW
+IPROYAL_PASSWORD=x1NFN2nK3r2w2umj
+IPROYAL_LIFE=1440
 
 CUSTOMER_BOT_TOKEN=${CUSTOMER_BOT_TOKEN}
 
