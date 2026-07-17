@@ -109,7 +109,7 @@ async def buy_v2ray(
     if not methods:
         await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست. با ادمین هماهنگ کنید.")
         return
-    price = service.v2ray_plan_price_for(role)
+    price = service.v2ray_plan_price_for_user(call.from_user.id, role)
     if price <= 0:
         await call.message.answer("⛔️ قیمت پلن V2Ray تنظیم نشده است. با ادمین هماهنگ کنید.")
         return
@@ -325,7 +325,7 @@ async def order_volume(message: Message, state: FSMContext, service: Service, ro
     await state.update_data(volume=volume)
     await state.set_state(OrderStates.confirming)
 
-    price = service.quote(role, product, volume)
+    price = service.quote_for(message.from_user.id, role, product, volume)
     payer = service._payer_for(role, product)
     cur = service.product_currency(product)
     loc_txt = _loc_text(data)
@@ -390,7 +390,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
             await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست. با ادمین هماهنگ کنید.")
             return
         try:
-            price_usd = service.quote(role, product, volume)
+            price_usd = service.quote_for(call.from_user.id, role, product, volume)
             order_id = service.create_order_payment(
                 call.from_user.id,
                 product=product,
@@ -443,7 +443,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
                 cfg.admin_id,
                 "🛒 <b>سفارش جدید</b>\n"
                 f"🧩 محصول: <b>{product_txt}</b>\n"
-                f"👤 کاربر: {uname} (<code>{u.id}</code>)\n"
+                f"👤 کاربر: {escape(uname)} (<code>{u.id}</code>)\n"
                 f"📦 حجم: <b>{result.volume_gb} GB</b>\n"
                 f"💵 مبلغ: <b>{result.price:g} {cur}</b> ({pay_note})\n"
                 f"🆔 سرویس: <code>#{result.config_id}</code>",

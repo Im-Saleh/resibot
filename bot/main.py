@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -11,12 +12,12 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import ConfigError, settings
-from .crypto import BscRpc, CryptoWatcher
+from .crypto import CryptoWatcher
 from .database import Database
 from .fulfillment import deliver_paid_order
 from .handlers import register_handlers
 from .ipn import start_ipn_server
-from .middlewares import ContextMiddleware
+from .middlewares import ContextMiddleware, ThrottleMiddleware
 from .nowpayments import NowPaymentsClient
 from .panel import PanelClient
 from .service import Service
@@ -64,8 +65,16 @@ async def run() -> None:
     dp["db"] = db
     dp["service"] = service
 
-    # میدلور ثبت کاربر و تزریق نقش
+    # میدلور ضدفلاد (اول) و سپس ثبت کاربر و تزریق نقش
+    dp.update.outer_middleware(ThrottleMiddleware(settings))
     dp.update.outer_middleware(ContextMiddleware(settings, db))
+
+    # هندلر سراسری خطا: هیچ خطای هندلری نباید ربات را از کار بیندازد یا اطلاعات لو دهد.
+    async def _on_error(event: Any) -> bool:
+        logger.exception("خطای پردازش‌نشده در هندلر: %s", getattr(event, "exception", event))
+        return True
+
+    dp.errors.register(_on_error)
 
     register_handlers(dp, settings, db)
 
@@ -84,25 +93,40 @@ async def run() -> None:
         if row is not None:
             await deliver_paid_order(bot, settings, db, service, row)
 
-    crypto_watcher = CryptoWatcher(
-        rpc=BscRpc(service.bsc_rpc_url),
-        db=db,
-        get_confirmations=lambda: service.crypto_confirmations,
-        settle=_settle_crypto,
-    )
-    watcher_task = asyncio.create_task(crypto_watcher.run())
+    # تأیید خودکار به‌صورت پیش‌فرض خاموش است؛ تأیید با ارسال هش تراکنش انجام می‌شود.
+    crypto_watcher = None
+    watcher_task = None
+    if service.crypto_autoconfirm:
+        crypto_watcher = CryptoWatcher(
+            pool=service.make_rpc_pool(),
+            db=db,
+            get_confirmations=lambda: service.crypto_confirmations,
+            settle=_settle_crypto,
+        )
+        watcher_task = asyncio.create_task(crypto_watcher.run())
+    else:
+        logger.info("تأیید خودکار کریپتو خاموش است؛ تأیید با ارسال هش تراکنش انجام می‌شود.")
 
     logger.info("%s در حال اجرا است...", settings.brand_name)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        # یوزرنیم ربات را برای ساخت لینک رفرال ذخیره می‌کنیم.
+        try:
+            me = await bot.get_me()
+            if me and me.username:
+                db.set_setting("bot_username", me.username)
+        except Exception:  # noqa: BLE001
+            logger.warning("گرفتن یوزرنیم ربات ناموفق بود")
         await dp.start_polling(bot)
     finally:
-        crypto_watcher.stop()
-        watcher_task.cancel()
-        try:
-            await watcher_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        if crypto_watcher is not None:
+            crypto_watcher.stop()
+        if watcher_task is not None:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if ipn_runner is not None:
             await ipn_runner.cleanup()
         await panel.close()

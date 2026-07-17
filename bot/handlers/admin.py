@@ -22,8 +22,10 @@ from ..keyboards import (
     admin_panel_menu,
     configs_list_keyboard,
     custbot_menu,
+    discount_product_keyboard,
     payments_admin_menu,
     prices_menu,
+    referral_discounts_menu,
     request_decision_keyboard,
     settings_menu,
     setrole_keyboard,
@@ -32,8 +34,10 @@ from ..keyboards import (
 )
 from ..service import (
     S_BSC_RPC,
+    S_CRYPTO_AUTOCONFIRM,
     S_CRYPTO_CONFIRMATIONS,
     S_CRYPTO_WALLET,
+    S_REFERRAL_PERCENT,
     S_HOST,
     S_IPROYAL_HOST,
     S_IPROYAL_PASSWORD,
@@ -382,7 +386,9 @@ def _pay_text(service: Service) -> str:
         f"• درگاه NowPayments: {'فعال ✅' if service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED) else 'غیرفعال ❌'}\n\n"
         "💠 <b>پرداخت مستقیم (USDT روی BEP20)</b>\n"
         f"👛 ولت مقصد: <code>{escape(wallet)}</code> ({wallet_ok})\n"
-        f"🔗 RPC: <code>{escape(service.bsc_rpc_url or '—')}</code>\n"
+        f"🔗 RPC اصلی: <code>{escape(service.bsc_rpc_url or '—')}</code>\n"
+        f"♻️ استخر RPC: <b>{len(service.bsc_rpc_urls)}</b> نود (failover خودکار)\n"
+        f"🤖 تأیید خودکار: getLogs + اسکن بلاک (رایگان، چنداستراتژی)\n"
         f"🔒 تأیید لازم: <b>{service.crypto_confirmations}</b>\n\n"
         "🛡 <b>پلن V2Ray (یک‌ماهه نامحدود)</b>\n"
         f"• شناسه اینباند: <b>{service.v2ray_inbound_id}</b>\n"
@@ -407,6 +413,20 @@ _PAY_TOGGLE_KEYS = {
 @router.callback_query(F.data.startswith("paytgl:"))
 async def adm_pay_toggle(call: CallbackQuery, service: Service) -> None:
     key = call.data.split(":", 1)[1]
+    # کلید تأیید خودکار در منوی رفرال/تخفیف است و منوی خودش را به‌روزرسانی می‌کند.
+    if key == "autoconfirm":
+        new_val = service.toggle_feature(S_CRYPTO_AUTOCONFIRM)
+        await call.answer(
+            f"تأیید خودکار: {'فعال شد ✅ (پس از ری‌استارت)' if new_val else 'خاموش شد ❌'}",
+            show_alert=True,
+        )
+        try:
+            await call.message.edit_reply_markup(
+                reply_markup=referral_discounts_menu(autoconfirm_on=new_val)
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return
     entry = _PAY_TOGGLE_KEYS.get(key)
     if not entry:
         await call.answer("نامعتبر", show_alert=True)
@@ -418,6 +438,159 @@ async def adm_pay_toggle(call: CallbackQuery, service: Service) -> None:
         await call.message.edit_text(_pay_text(service), reply_markup=_pay_kb(service))
     except Exception:  # noqa: BLE001
         pass
+
+
+# ====================================================================== #
+#  رفرال و تخفیف کاربران
+# ====================================================================== #
+_DISCOUNT_PRODUCT_LABEL = {
+    "all": "همه محصولات",
+    "residential": "رزیدنتال",
+    "residential2": "رزیدنتال ۲",
+    "v2ray": "V2Ray",
+}
+
+
+@router.callback_query(F.data == "adm:refdisc")
+async def adm_refdisc(call: CallbackQuery, service: Service) -> None:
+    await call.answer()
+    await call.message.answer(
+        "🎁 <b>رفرال و تخفیف کاربران</b>\n\n"
+        f"• درصد پاداش رفرال فعلی: <b>{service.referral_percent:g}%</b>\n"
+        "• می‌توانید برای هر کاربر، تخفیف درصدی روی «همه محصولات» یا یک محصول مشخص تعیین کنید.\n\n"
+        "یکی را انتخاب کنید:",
+        reply_markup=referral_discounts_menu(autoconfirm_on=service.crypto_autoconfirm),
+    )
+
+
+@router.message(AdminStates.set_referral_percent)
+async def s_referral_percent(message: Message, state: FSMContext, service: Service) -> None:
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        val = float(raw)
+        if not (0 <= val <= 100):
+            raise ValueError
+    except ValueError:
+        await message.answer("⛔️ یک عدد بین ۰ تا ۱۰۰ بفرستید.")
+        return
+    service.set_setting(S_REFERRAL_PERCENT, str(val))
+    await state.clear()
+    await message.answer(f"✅ درصد پاداش رفرال به <b>{val:g}%</b> تغییر کرد.")
+
+
+@router.callback_query(F.data == "disc:add")
+async def disc_add(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminStates.disc_user)
+    await call.answer()
+    await call.message.answer("🏷 آیدی عددی کاربری که می‌خواهید تخفیف بدهید را بفرستید:")
+
+
+@router.message(AdminStates.disc_user)
+async def disc_user(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("⛔️ آیدی باید عددی باشد.")
+        return
+    await state.clear()
+    await message.answer(
+        f"محصولِ هدفِ تخفیف برای کاربر <code>{text}</code> را انتخاب کنید:",
+        reply_markup=discount_product_keyboard(int(text)),
+    )
+
+
+@router.callback_query(F.data.startswith("disc:") & ~F.data.in_({"disc:add", "disc:list"}))
+async def disc_pick_product(call: CallbackQuery, state: FSMContext, service: Service, db: Database) -> None:
+    parts = call.data.split(":")
+    # فرمت: disc:<tgid>:<product>  یا  disc:del:<tgid>:<product>
+    if parts[1] == "del" and len(parts) == 4:
+        tg_id, product = int(parts[2]), parts[3]
+        db.remove_discount(tg_id, product)
+        await call.answer("حذف شد.")
+        rows = db.list_all_discounts()
+        await call.message.edit_text(_discounts_list_text(rows), reply_markup=_discounts_list_kb(rows))
+        return
+    if len(parts) != 3 or not parts[1].isdigit():
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    tg_id, product = int(parts[1]), parts[2]
+    if product not in _DISCOUNT_PRODUCT_LABEL:
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    await state.set_state(AdminStates.disc_percent)
+    await state.update_data(disc_tg=tg_id, disc_product=product)
+    await call.answer()
+    await call.message.answer(
+        f"درصد تخفیف برای کاربر <code>{tg_id}</code> روی «{_DISCOUNT_PRODUCT_LABEL[product]}» را بفرستید "
+        "(عدد بین ۰ تا ۹۰). برای حذف تخفیف، عدد <code>0</code> را بفرستید:"
+    )
+
+
+@router.message(AdminStates.disc_percent)
+async def disc_set_percent(message: Message, state: FSMContext, db: Database) -> None:
+    raw = (message.text or "").strip().replace(",", ".")
+    try:
+        pct = float(raw)
+        if not (0 <= pct <= 90):
+            raise ValueError
+    except ValueError:
+        await message.answer("⛔️ یک عدد بین ۰ تا ۹۰ بفرستید.")
+        return
+    data = await state.get_data()
+    await state.clear()
+    tg_id = int(data.get("disc_tg", 0))
+    product = data.get("disc_product", "all")
+    if pct <= 0:
+        db.remove_discount(tg_id, product)
+        await message.answer(
+            f"✅ تخفیف کاربر <code>{tg_id}</code> روی «{_DISCOUNT_PRODUCT_LABEL.get(product, product)}» حذف شد."
+        )
+        return
+    db.set_discount(tg_id, product, pct)
+    await message.answer(
+        f"✅ تخفیف <b>{pct:g}%</b> برای کاربر <code>{tg_id}</code> روی "
+        f"«{_DISCOUNT_PRODUCT_LABEL.get(product, product)}» ثبت شد."
+    )
+    try:
+        await message.bot.send_message(
+            tg_id,
+            f"🏷 یک تخفیف <b>{pct:g}%</b> روی «{_DISCOUNT_PRODUCT_LABEL.get(product, product)}» "
+            "برای شما فعال شد! در خرید بعدی اعمال می‌شود.",
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _discounts_list_text(rows) -> str:
+    if not rows:
+        return "📋 هیچ تخفیفی ثبت نشده است."
+    lines = ["📋 <b>تخفیف‌های ثبت‌شده:</b>"]
+    for r in rows:
+        lines.append(
+            f"• <code>{r['tg_id']}</code> — {_DISCOUNT_PRODUCT_LABEL.get(r['product'], r['product'])}: "
+            f"<b>{float(r['percent']):g}%</b>"
+        )
+    lines.append("\nبرای حذف، روی دکمه‌ی مربوطه بزنید:")
+    return "\n".join(lines)
+
+
+def _discounts_list_kb(rows):
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    kb = []
+    for r in rows[:50]:
+        kb.append([InlineKeyboardButton(
+            text=f"❌ {r['tg_id']} — {_DISCOUNT_PRODUCT_LABEL.get(r['product'], r['product'])}",
+            callback_data=f"disc:del:{r['tg_id']}:{r['product']}",
+        )])
+    if not kb:
+        kb.append([InlineKeyboardButton(text="—", callback_data="noop")])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+@router.callback_query(F.data == "disc:list")
+async def disc_list(call: CallbackQuery, db: Database) -> None:
+    await call.answer()
+    rows = db.list_all_discounts()
+    await call.message.answer(_discounts_list_text(rows), reply_markup=_discounts_list_kb(rows))
 
 
 @router.callback_query(F.data == "adm:settings")
@@ -467,6 +640,7 @@ _SETTING_PROMPTS = {
     "v2ray_inbound": (AdminStates.set_v2ray_inbound, "شناسه عددی اینباند V2Ray در پنل را بفرستید (مثلاً 6):"),
     "v2ray_plan_price": (AdminStates.set_v2ray_plan_price, "قیمت پلن V2Ray عادی (USDT) را بفرستید:"),
     "v2ray_plan_reseller": (AdminStates.set_v2ray_plan_reseller, "قیمت پلن V2Ray همکار (USDT) را بفرستید:"),
+    "referral_percent": (AdminStates.set_referral_percent, "درصد پاداش رفرال را بفرستید (عدد بین ۰ تا ۱۰۰):"),
 }
 
 

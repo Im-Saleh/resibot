@@ -10,7 +10,7 @@
 # ============================================================
 set -euo pipefail
 
-REPO_URL="https://github.com/W2F-Sa/resibot.git"
+REPO_URL="https://github.com/Im-Saleh/resibot.git"
 INSTALL_DIR="/opt/resibot"
 SERVICE_NAME="resibot"
 PY_MIN_MINOR=10   # حداقل پایتون 3.10
@@ -46,7 +46,11 @@ fi
 
 bold "==> دریافت/به‌روزرسانی کد"
 if [[ -d "$INSTALL_DIR/.git" ]]; then
-  git -C "$INSTALL_DIR" pull --ff-only
+  # اصلاح آدرس ریموت (مثلاً اگر یوزرنیم/مخزن گیت‌هاب عوض شده باشد)
+  git -C "$INSTALL_DIR" remote set-url origin "$REPO_URL" 2>/dev/null || \
+    git -C "$INSTALL_DIR" remote add origin "$REPO_URL"
+  git -C "$INSTALL_DIR" pull --ff-only || \
+    { git -C "$INSTALL_DIR" fetch origin && git -C "$INSTALL_DIR" reset --hard origin/main; }
 else
   git clone --depth 1 "$REPO_URL" "$INSTALL_DIR"
 fi
@@ -244,8 +248,10 @@ CRYPTO_WALLET_ADDRESS=${CRYPTO_WALLET_ADDRESS}
 BSC_RPC_URL=${BSC_RPC_URL}
 CRYPTO_CONFIRMATIONS=${CRYPTO_CONFIRMATIONS}
 CRYPTO_PAYMENT_TTL_MIN=60
+CRYPTO_AUTOCONFIRM=0
 PAY_CRYPTO_ENABLED=1
 PAY_NOWPAYMENTS_ENABLED=1
+REFERRAL_PERCENT=5
 
 V2RAY_INBOUND_ID=${V2RAY_INBOUND_ID}
 V2RAY_PLAN_DAYS=30

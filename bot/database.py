@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -62,6 +62,8 @@ class Database:
                 self._migrate_v4()
             if current < 5:
                 self._migrate_v5()
+            if current < 6:
+                self._migrate_v6()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -231,6 +233,29 @@ class Database:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
         c.execute("CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method)")
+        c.commit()
+
+    def _migrate_v6(self) -> None:
+        """رفرال (referred_by/ref_earnings روی users) + جدول تخفیف‌های کاربر.
+
+        همه‌ی تغییرات additive هستند و هیچ داده‌ای پاک نمی‌شود.
+        """
+        c = self._conn
+        if not self._column_exists("users", "referred_by"):
+            c.execute("ALTER TABLE users ADD COLUMN referred_by INTEGER NOT NULL DEFAULT 0")
+        if not self._column_exists("users", "ref_earnings"):
+            c.execute("ALTER TABLE users ADD COLUMN ref_earnings REAL NOT NULL DEFAULT 0")
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS discounts (
+                tg_id   INTEGER NOT NULL,
+                product TEXT NOT NULL,   -- 'all' یا نوع محصول مشخص
+                percent REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (tg_id, product)
+            );
+            """
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_users_ref ON users(referred_by)")
         c.commit()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
@@ -439,6 +464,86 @@ class Database:
         return self.query_all(
             "SELECT * FROM users WHERE role = ? ORDER BY updated_at DESC", (role,)
         )
+
+    # ------------------------------------------------------------------ #
+    # رفرال
+    # ------------------------------------------------------------------ #
+    def set_referrer(self, tg_id: int, referrer_id: int) -> bool:
+        """معرف را ثبت می‌کند فقط اگر قبلاً ثبت نشده و معرف ≠ خود کاربر باشد."""
+        if referrer_id <= 0 or referrer_id == tg_id:
+            return False
+        self.ensure_user(tg_id)
+        self.ensure_user(referrer_id)
+        cur = self.execute(
+            "UPDATE users SET referred_by = ? WHERE tg_id = ? AND "
+            "(referred_by IS NULL OR referred_by = 0)",
+            (int(referrer_id), int(tg_id)),
+        )
+        return cur.rowcount > 0
+
+    def get_referrer(self, tg_id: int) -> int:
+        row = self.get_user(tg_id)
+        try:
+            return int(row["referred_by"]) if row else 0
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0
+
+    def add_ref_earning(self, tg_id: int, amount: float) -> float:
+        """پاداش رفرال را هم به موجودی و هم به مجموع درآمد رفرال اضافه می‌کند."""
+        amount = float(amount)
+        with self._lock:
+            self.ensure_user(tg_id)
+            self._conn.execute(
+                "UPDATE users SET balance = balance + ?, ref_earnings = ref_earnings + ?, "
+                "updated_at = ? WHERE tg_id = ?",
+                (amount, amount, int(time.time()), int(tg_id)),
+            )
+            self._conn.commit()
+            row = self._conn.execute("SELECT balance FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
+            return float(row[0]) if row else 0.0
+
+    def count_referrals(self, tg_id: int) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS c FROM users WHERE referred_by = ?", (int(tg_id),)
+        )
+        return int(row["c"]) if row else 0
+
+    def ref_earnings(self, tg_id: int) -> float:
+        row = self.get_user(tg_id)
+        try:
+            return float(row["ref_earnings"]) if row else 0.0
+        except (KeyError, IndexError, TypeError, ValueError):
+            return 0.0
+
+    # ------------------------------------------------------------------ #
+    # تخفیف‌های کاربر (درصدی؛ روی همه محصولات یا محصول مشخص)
+    # ------------------------------------------------------------------ #
+    def set_discount(self, tg_id: int, product: str, percent: float) -> None:
+        self.execute(
+            "INSERT INTO discounts(tg_id, product, percent) VALUES(?, ?, ?) "
+            "ON CONFLICT(tg_id, product) DO UPDATE SET percent = excluded.percent",
+            (int(tg_id), product, float(percent)),
+        )
+
+    def remove_discount(self, tg_id: int, product: str) -> None:
+        self.execute(
+            "DELETE FROM discounts WHERE tg_id = ? AND product = ?", (int(tg_id), product)
+        )
+
+    def get_discount_percent(self, tg_id: int, product: str) -> float:
+        row = self.query_one(
+            "SELECT percent FROM discounts WHERE tg_id = ? AND product = ?",
+            (int(tg_id), product),
+        )
+        return float(row["percent"]) if row else 0.0
+
+    def list_discounts_for(self, tg_id: int) -> list[sqlite3.Row]:
+        return self.query_all(
+            "SELECT * FROM discounts WHERE tg_id = ? ORDER BY product", (int(tg_id),)
+        )
+
+    def list_all_discounts(self) -> list[sqlite3.Row]:
+        return self.query_all("SELECT * FROM discounts ORDER BY tg_id, product")
 
     def count_users(self) -> int:
         row = self.query_one("SELECT COUNT(*) AS c FROM users")

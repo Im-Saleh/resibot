@@ -8,6 +8,8 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/resibot"
 SERVICE_NAME="resibot"
+# آدرس رسمی مخزن. اگر یوزرنیم/مخزن گیت‌هاب عوض شد، فقط همین‌جا را تغییر بده.
+REPO_URL="https://github.com/Im-Saleh/resibot.git"
 
 green() { printf "\033[32m%s\033[0m\n" "$*"; }
 bold()  { printf "\033[1m%s\033[0m\n" "$*"; }
@@ -24,6 +26,14 @@ if [[ ! -d "$INSTALL_DIR/.git" ]]; then
 fi
 
 cd "$INSTALL_DIR"
+
+# اصلاح خودکار آدرس ریموت (اگر یوزرنیم/مخزن گیت‌هاب عوض شده باشد، آپدیت گیر نکند)
+bold "==> اطمینان از درستی آدرس مخزن (origin)"
+if git remote | grep -q '^origin$'; then
+  git remote set-url origin "$REPO_URL"
+else
+  git remote add origin "$REPO_URL"
+fi
 
 # پشتیبان‌گیری ایمن از دیتابیس قبل از آپدیت
 if [[ -f "data/resibot.db" ]]; then

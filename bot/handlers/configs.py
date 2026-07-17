@@ -380,7 +380,7 @@ async def renew_start(
         if not methods:
             await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست.")
             return
-        price = service.v2ray_plan_price_for(role)
+        price = service.v2ray_plan_price_for_user(call.from_user.id, role)
         order_id = service.create_order_payment(
             call.from_user.id, product="v2ray", usd=price,
             meta_extra={"renew_config_id": config_id},

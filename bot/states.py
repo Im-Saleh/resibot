@@ -74,6 +74,10 @@ class AdminStates(StatesGroup):
     set_v2ray_inbound = State()
     set_v2ray_plan_price = State()
     set_v2ray_plan_reseller = State()
+    # رفرال و تخفیف کاربران
+    set_referral_percent = State()
+    disc_user = State()      # آیدی کاربر برای تعیین تخفیف
+    disc_percent = State()   # درصد تخفیف
     setrole_id = State()
     credit_id = State()
     credit_amount = State()
