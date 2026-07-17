@@ -15,6 +15,7 @@ from ..database import (
     ROLE_V2RAY_RESELLER,
 )
 from ..keyboards import (
+    back_to_menu_kb,
     pay_methods_keyboard,
     partnership_menu,
     request_decision_keyboard,
@@ -67,7 +68,9 @@ async def wallet_topup_start(call: CallbackQuery, state: FSMContext, service: Se
     await state.set_state(WalletStates.entering_amount)
     await call.message.answer(
         f"💳 مبلغ شارژ را به <b>{service.currency}</b> وارد کنید (فقط عدد):\n"
-        f"نرخ تبدیل: هر دلار/تتر = <b>{service.toman_per_usd:g} {service.currency}</b>"
+        f"• حداقل شارژ: <b>{service.min_topup:g} {service.currency}</b>\n"
+        f"• نرخ تبدیل: هر دلار/تتر = <b>{service.toman_per_usd:g} {service.currency}</b>",
+        reply_markup=back_to_menu_kb(),
     )
 
 
@@ -81,6 +84,13 @@ async def wallet_topup_amount(message: Message, state: FSMContext, service: Serv
         return
     if amount <= 0 or amount > MAX_TOPUP:
         await message.answer(f"⛔️ مبلغ باید بین ۰ و {MAX_TOPUP:g} باشد.")
+        return
+    if amount < service.min_topup:
+        await message.answer(
+            f"⛔️ حداقل مبلغ شارژ <b>{service.min_topup:g} {service.currency}</b> است. "
+            "مبلغ بیشتری وارد کنید:",
+            reply_markup=back_to_menu_kb(),
+        )
         return
     methods = service.enabled_pay_methods()
     if not methods:

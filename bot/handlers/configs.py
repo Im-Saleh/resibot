@@ -14,6 +14,7 @@ from ..config import Settings
 from ..database import Database
 from ..keyboards import (
     LIFE_PRESETS_RES2,
+    back_to_menu_kb,
     config_actions,
     configs_list_keyboard,
     confirm_delete,
@@ -130,7 +131,10 @@ async def change_ip(call: CallbackQuery, service: Service, db: Database, cfg: Se
         logger.exception("change_ip failed")
         await msg.edit_text(f"❌ خطا در تغییر IP:\n<code>{exc}</code>")
         return
-    await msg.edit_text(f"✅ IP با موفقیت تغییر کرد.\n🔑 session جدید: <code>{session}</code>")
+    await msg.edit_text(
+        f"✅ IP با موفقیت تغییر کرد.\n🔑 session جدید: <code>{session}</code>",
+        reply_markup=back_to_menu_kb(),
+    )
 
 
 # ---------------------------------------------------------------------- #
@@ -162,7 +166,7 @@ async def show_usage(call: CallbackQuery, service: Service, db: Database, cfg: S
         f"💾 باقیمانده: {remaining_txt}\n"
         f"⏳ انقضا: {fmt_expiry(expiry_ms)}"
     )
-    await call.message.answer(text)
+    await call.message.answer(text, reply_markup=back_to_menu_kb())
 
 
 # ---------------------------------------------------------------------- #
@@ -208,7 +212,7 @@ async def show_links(call: CallbackQuery, service: Service, db: Database, cfg: S
         lines.append("\n📋 <b>لینک مستقیم:</b>")
         for vl in vless_links:
             lines.append(f"<code>{escape(vl)}</code>")
-    await call.message.answer("\n".join(lines))
+    await call.message.answer("\n".join(lines), reply_markup=back_to_menu_kb())
 
 
 # ---------------------------------------------------------------------- #

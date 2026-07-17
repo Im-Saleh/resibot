@@ -490,8 +490,11 @@ class CryptoWatcher:
 
     @staticmethod
     def _find_payment(waiting: list, m: TransferMatch) -> Optional[Any]:
-        """فاکتور در انتظاری که آدرس و مبلغ و بلاکش با این واریز می‌خواند."""
-        best = None
+        """فاکتوری که آدرس و مبلغِ «یکتا و دقیق» و بلاکش با این واریز بخواند.
+
+        چون مبلغ هر فاکتور یکتا و غیررند است (مثل 1.000021)، تطبیق باید «دقیق»
+        باشد تا واریز به فاکتور درست بچسبد و از تداخل جلوگیری شود.
+        """
         for p in waiting:
             if normalize_address(p["pay_address"]) != m.to_address:
                 continue
@@ -500,13 +503,9 @@ class CryptoWatcher:
                 continue
             if m.block_number < int(p["start_block"] or 0):
                 continue  # واریز قبل از ساخت فاکتور — نامعتبر
-            if not amount_matches(m.amount, expected):
-                continue
-            # نزدیک‌ترین مبلغ را انتخاب می‌کنیم تا واریز به فاکتور درست بچسبد.
-            if best is None or expected > round(float(best["pay_amount"]), 6):
-                if m.amount + 0.0005 >= expected:
-                    best = p
-        return best
+            if abs(m.amount - expected) <= 1e-6:  # تطبیق دقیق مبلغ یکتا
+                return p
+        return None
 
 
 
