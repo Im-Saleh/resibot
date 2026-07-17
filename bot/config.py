@@ -165,6 +165,10 @@ class Settings:
     # فعال/غیرفعال بودن هر روش پرداخت (مقدار اولیه؛ در دیتابیس ماندگار می‌شود).
     pay_crypto_enabled: bool = field(default_factory=lambda: _get_bool("PAY_CRYPTO_ENABLED", True))
     pay_nowpayments_enabled: bool = field(default_factory=lambda: _get_bool("PAY_NOWPAYMENTS_ENABLED", True))
+    # تأیید خودکار کریپتو (پیش‌فرض خاموش؛ تأیید با ارسال هش تراکنش انجام می‌شود).
+    crypto_autoconfirm: bool = field(default_factory=lambda: _get_bool("CRYPTO_AUTOCONFIRM", False))
+    # درصد پاداش رفرال (به ازای هر خرید کاربر معرفی‌شده، به کیف پول معرف اضافه می‌شود).
+    referral_percent: float = field(default_factory=lambda: _get_float("REFERRAL_PERCENT", 5.0))
 
     # --- پلن V2Ray (یک‌ماهه نامحدود روی اینباند موجود) ---
     # شناسه‌ی اینباند از پیش‌ساخته‌شده در پنل که کلاینت V2Ray در آن ساخته می‌شود.

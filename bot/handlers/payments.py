@@ -82,18 +82,16 @@ async def pm_crypto(call: CallbackQuery, service: Service, db: Database) -> None
     amount_txt = _fmt_amount(float(info["pay_amount"]))
     text = (
         "💠 <b>پرداخت مستقیم USDT — شبکه BEP20 (BSC)</b>\n\n"
-        "لطفاً <b>دقیقاً همین مبلغ</b> را به آدرس زیر واریز کنید (مبلغ یکتاست و "
-        "برای شناسایی خودکار پرداخت شما استفاده می‌شود):\n\n"
-        f"💵 مبلغ دقیق: <b>{amount_txt} USDT</b>\n"
+        "مبلغ زیر را به آدرس مقصد واریز کنید:\n\n"
+        f"💵 مبلغ: <b>{amount_txt} USDT</b>\n"
         f"🌐 شبکه: <b>BEP20 (BSC)</b>\n"
         "👛 آدرس مقصد:\n"
         f"<code>{escape(info['address'])}</code>\n\n"
-        f"⏳ اعتبار فاکتور: <b>{info['ttl_min']} دقیقه</b>\n"
-        f"🔒 پس از <b>{info['confirmations']}</b> تأیید شبکه، سرویس تحویل می‌شود.\n\n"
-        "🚀 <b>سریع‌ترین راه:</b> بعد از واریز، دکمه‌ی «🧾 ارسال هش تراکنش» را بزنید و "
-        "TxID یا لینک BscScan را بفرستید تا بلافاصله بررسی و تحویل شود.\n\n"
+        f"⏳ اعتبار فاکتور: <b>{info['ttl_min']} دقیقه</b>\n\n"
+        "✅ <b>بعد از واریز، دکمه‌ی «🧾 ارسال هش تراکنش / لینک» را بزنید</b> و کد رهگیری "
+        "(TxID) یا لینک BscScan تراکنش را بفرستید تا بررسی و سرویس تحویل داده شود.\n\n"
         "⚠️ <b>هشدار امنیتی:</b> فقط <b>USDT واقعی روی شبکه‌ی BEP20</b> بفرستید. "
-        "توکن تقلبی، شبکه‌ی دیگر یا مبلغ متفاوت پذیرفته نمی‌شود."
+        "توکن تقلبی یا شبکه‌ی دیگر پذیرفته نمی‌شود."
     )
     await call.message.answer(text, reply_markup=crypto_paid_keyboard(order_id))
     png = make_qr_png(info["address"])
@@ -176,8 +174,8 @@ async def crypto_check(call: CallbackQuery, db: Database, service: Service) -> N
         await call.answer("⛔️ این فاکتور منقضی شده است. لطفاً دوباره سفارش دهید.", show_alert=True)
         return
     await call.answer(
-        "⏳ هنوز واریز تأییدشده‌ای دیده نشده. رصد خودکار هر چند ثانیه بررسی می‌کند؛ "
-        "یا هش تراکنش را بفرستید تا سریع‌تر بررسی شود.",
+        "ℹ️ برای تأیید پرداخت، بعد از واریز دکمه‌ی «🧾 ارسال هش تراکنش / لینک» را بزنید و "
+        "کد رهگیری تراکنش را بفرستید.",
         show_alert=True,
     )
 

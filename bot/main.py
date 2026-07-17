@@ -93,25 +93,40 @@ async def run() -> None:
         if row is not None:
             await deliver_paid_order(bot, settings, db, service, row)
 
-    crypto_watcher = CryptoWatcher(
-        pool=service.make_rpc_pool(),
-        db=db,
-        get_confirmations=lambda: service.crypto_confirmations,
-        settle=_settle_crypto,
-    )
-    watcher_task = asyncio.create_task(crypto_watcher.run())
+    # تأیید خودکار به‌صورت پیش‌فرض خاموش است؛ تأیید با ارسال هش تراکنش انجام می‌شود.
+    crypto_watcher = None
+    watcher_task = None
+    if service.crypto_autoconfirm:
+        crypto_watcher = CryptoWatcher(
+            pool=service.make_rpc_pool(),
+            db=db,
+            get_confirmations=lambda: service.crypto_confirmations,
+            settle=_settle_crypto,
+        )
+        watcher_task = asyncio.create_task(crypto_watcher.run())
+    else:
+        logger.info("تأیید خودکار کریپتو خاموش است؛ تأیید با ارسال هش تراکنش انجام می‌شود.")
 
     logger.info("%s در حال اجرا است...", settings.brand_name)
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        # یوزرنیم ربات را برای ساخت لینک رفرال ذخیره می‌کنیم.
+        try:
+            me = await bot.get_me()
+            if me and me.username:
+                db.set_setting("bot_username", me.username)
+        except Exception:  # noqa: BLE001
+            logger.warning("گرفتن یوزرنیم ربات ناموفق بود")
         await dp.start_polling(bot)
     finally:
-        crypto_watcher.stop()
-        watcher_task.cancel()
-        try:
-            await watcher_task
-        except (asyncio.CancelledError, Exception):  # noqa: BLE001
-            pass
+        if crypto_watcher is not None:
+            crypto_watcher.stop()
+        if watcher_task is not None:
+            watcher_task.cancel()
+            try:
+                await watcher_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if ipn_runner is not None:
             await ipn_runner.cleanup()
         await panel.close()

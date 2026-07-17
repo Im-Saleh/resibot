@@ -119,6 +119,7 @@ async def deliver_paid_order(
     product = meta.get("product", "residential")
     usd = float(meta.get("usd", credited_row["amount"] or 0))
 
+    delivered = False
     try:
         if product == PRODUCT_V2RAY:
             renew_id = meta.get("renew_config_id")
@@ -145,6 +146,7 @@ async def deliver_paid_order(
                 "✅ پرداخت شما تأیید شد و سرویس ساخته شد:\n\n" + provision_message(res),
             )
             _notify_admin_sale(bot, cfg, tg_id, f"رزیدنتال ({product})", usd, method_label)
+        delivered = True
     except Exception:  # noqa: BLE001
         logger.exception("ساخت سرویس پس از پرداخت ناموفق بود (order=%s)", credited_row["order_id"])
         try:
@@ -160,6 +162,29 @@ async def deliver_paid_order(
             )
         except Exception:  # noqa: BLE001
             pass
+
+    # پاداش رفرال (فقط پس از تحویل موفق خرید محصول)
+    if delivered:
+        try:
+            ref = service.credit_referral(tg_id, usd)
+            if ref:
+                await _notify_referral(bot, ref, tg_id)
+        except Exception:  # noqa: BLE001
+            logger.warning("واریز پاداش رفرال ناموفق بود")
+
+
+async def _notify_referral(bot: Any, ref: dict[str, Any], buyer_tg_id: int) -> None:
+    """به معرف اطلاع می‌دهد که پاداش رفرال دریافت کرده است."""
+    try:
+        await bot.send_message(
+            int(ref["referrer"]),
+            "🎁 <b>پاداش رفرال</b>\n"
+            f"یکی از دعوت‌شده‌های شما (<code>{buyer_tg_id}</code>) خرید کرد!\n"
+            f"💰 <b>{ref['reward']:g} {ref['currency']}</b> ({ref['percent']:g}%) به کیف پول شما اضافه شد.\n"
+            f"💼 موجودی فعلی: <b>{ref['new_balance']:g} {ref['currency']}</b>",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("اطلاع پاداش رفرال به معرف ناموفق بود")
 
 
 def _notify_admin_sale(

@@ -35,11 +35,27 @@ def main_menu(
             InlineKeyboardButton(text="🧾 سرویس‌های من", callback_data="menu:configs"),
         ],
         second_row,
+        [InlineKeyboardButton(text="👥 دعوت دوستان (رفرال)", callback_data="menu:referral")],
         [InlineKeyboardButton(text="📖 راهنمای خرید و استفاده", callback_data="menu:guide")],
     ]
+    # وضعیت سرویس فقط برای ادمین/همکار
+    if is_admin or is_reseller:
+        rows.append([InlineKeyboardButton(text="📊 وضعیت سرویس‌ها", callback_data="menu:status")])
     if is_admin:
         rows.append([InlineKeyboardButton(text="🛠 پنل مدیریت", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def discount_product_keyboard(tg_id: int) -> InlineKeyboardMarkup:
+    """انتخاب محصولِ هدفِ تخفیف برای یک کاربر مشخص."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🌟 همه‌ی محصولات", callback_data=f"disc:{tg_id}:all")],
+            [InlineKeyboardButton(text="🌐 رزیدنتال", callback_data=f"disc:{tg_id}:residential")],
+            [InlineKeyboardButton(text="🌍 رزیدنتال ۲", callback_data=f"disc:{tg_id}:residential2")],
+            [InlineKeyboardButton(text="🛡 V2Ray", callback_data=f"disc:{tg_id}:v2ray")],
+        ]
+    )
 
 
 def back_to_menu_kb() -> InlineKeyboardMarkup:
@@ -387,6 +403,7 @@ def admin_panel_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📣 پیام همگانی", callback_data="adm:broadcast")],
             [InlineKeyboardButton(text="💵 قیمت‌ها", callback_data="adm:prices")],
             [InlineKeyboardButton(text="💳 روش‌های پرداخت", callback_data="adm:pay")],
+            [InlineKeyboardButton(text="🎁 رفرال و تخفیف کاربران", callback_data="adm:refdisc")],
             [InlineKeyboardButton(text="⚙️ تنظیمات سرور", callback_data="adm:settings")],
             [InlineKeyboardButton(text="🔀 نمایش/مخفی‌سازی بخش‌ها", callback_data="adm:toggles")],
             [InlineKeyboardButton(text="🤖 ربات کمکی مشتری", callback_data="adm:custbot")],
@@ -413,6 +430,19 @@ def payments_admin_menu(*, crypto_on: bool, nowpayments_on: bool) -> InlineKeybo
             [InlineKeyboardButton(text="🛡 شناسه اینباند V2Ray", callback_data="set:v2ray_inbound")],
             [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (عادی)", callback_data="set:v2ray_plan_price")],
             [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (همکار)", callback_data="set:v2ray_plan_reseller")],
+        ]
+    )
+
+
+def referral_discounts_menu(*, autoconfirm_on: bool) -> InlineKeyboardMarkup:
+    """منوی رفرال، تخفیف کاربران و کلید تأیید خودکار."""
+    mark = "✅" if autoconfirm_on else "❌"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🎁 درصد پاداش رفرال", callback_data="set:referral_percent")],
+            [InlineKeyboardButton(text="🏷 تعیین تخفیف برای کاربر", callback_data="disc:add")],
+            [InlineKeyboardButton(text="📋 لیست تخفیف‌ها", callback_data="disc:list")],
+            [InlineKeyboardButton(text=f"{mark} تأیید خودکار کریپتو", callback_data="paytgl:autoconfirm")],
         ]
     )
 

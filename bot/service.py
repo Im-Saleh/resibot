@@ -89,6 +89,10 @@ S_PAY_NOWPAYMENTS_ENABLED = "pay_nowpayments_enabled"
 S_CRYPTO_WALLET = "crypto_wallet_address"
 S_BSC_RPC = "bsc_rpc_url"
 S_CRYPTO_CONFIRMATIONS = "crypto_confirmations"
+S_CRYPTO_AUTOCONFIRM = "crypto_autoconfirm"
+
+# رفرال
+S_REFERRAL_PERCENT = "referral_percent"
 
 # پلن V2Ray (یک‌ماهه نامحدود)
 S_V2RAY_INBOUND_ID = "v2ray_inbound_id"
@@ -166,6 +170,8 @@ class Service:
         self.db.seed_setting(S_CRYPTO_WALLET, self.cfg.crypto_wallet_address)
         self.db.seed_setting(S_BSC_RPC, self.cfg.bsc_rpc_url)
         self.db.seed_setting(S_CRYPTO_CONFIRMATIONS, str(self.cfg.crypto_confirmations))
+        self.db.seed_setting(S_CRYPTO_AUTOCONFIRM, "1" if self.cfg.crypto_autoconfirm else "0")
+        self.db.seed_setting(S_REFERRAL_PERCENT, str(self.cfg.referral_percent))
         # پلن V2Ray
         self.db.seed_setting(S_V2RAY_INBOUND_ID, str(self.cfg.v2ray_inbound_id))
         self.db.seed_setting(S_V2RAY_PLAN_PRICE, str(self.cfg.v2ray_plan_price))
@@ -304,6 +310,60 @@ class Service:
     @property
     def crypto_confirmations(self) -> int:
         return max(1, self._isetting(S_CRYPTO_CONFIRMATIONS, self.cfg.crypto_confirmations))
+
+    @property
+    def crypto_autoconfirm(self) -> bool:
+        return self.feature_enabled(S_CRYPTO_AUTOCONFIRM, default=False)
+
+    # --- رفرال ---
+    @property
+    def referral_percent(self) -> float:
+        pct = self._fsetting(S_REFERRAL_PERCENT, self.cfg.referral_percent)
+        return max(0.0, min(100.0, pct))
+
+    def credit_referral(self, buyer_tg_id: int, usd_amount: float) -> Optional[dict[str, Any]]:
+        """پس از خرید موفق، درصد رفرال را به کیف پول معرف اضافه می‌کند.
+
+        پاداش به واحد کیف پول (تومان) محاسبه می‌شود: usd × درصد × نرخ تتر/تومان.
+        اگر معرفی وجود نداشته باشد None برمی‌گرداند.
+        """
+        referrer = self.db.get_referrer(buyer_tg_id)
+        if not referrer or referrer == buyer_tg_id:
+            return None
+        pct = self.referral_percent
+        if pct <= 0:
+            return None
+        reward = round(float(usd_amount) * pct / 100.0 * self.toman_per_usd, 2)
+        if reward <= 0:
+            return None
+        new_balance = self.db.add_ref_earning(referrer, reward)
+        return {
+            "referrer": referrer,
+            "reward": reward,
+            "percent": pct,
+            "currency": self.currency,
+            "new_balance": new_balance,
+        }
+
+    # --- تخفیف‌های کاربر ---
+    def discount_percent(self, tg_id: int, product: str) -> float:
+        """بیشترین تخفیف قابل‌اعمال برای این کاربر و محصول (بین «همه» و محصول مشخص)."""
+        p_all = self.db.get_discount_percent(tg_id, "all")
+        p_prod = self.db.get_discount_percent(tg_id, product)
+        return max(0.0, min(90.0, max(p_all, p_prod)))
+
+    def apply_discount(self, price: float, tg_id: int, product: str) -> float:
+        pct = self.discount_percent(tg_id, product)
+        if pct <= 0:
+            return round(float(price), 2)
+        return round(float(price) * (1.0 - pct / 100.0), 2)
+
+    def quote_for(self, tg_id: int, role: str, product: str, volume_gb: int) -> float:
+        """قیمت نهایی با اعمال تخفیف کاربر."""
+        return self.apply_discount(self.quote(role, product, volume_gb), tg_id, product)
+
+    def v2ray_plan_price_for_user(self, tg_id: int, role: str) -> float:
+        return self.apply_discount(self.v2ray_plan_price_for(role), tg_id, PRODUCT_V2RAY)
 
     # --- پلن V2Ray ---
     @property
@@ -801,9 +861,50 @@ class Service:
             life=self._clamp_life(row["life"], product), session=row["session"],
         )
         outbound = self._build_proxy_outbound(product, row["outbound_tag"], loc)
-        res = await self.panel.test_outbound(outbound, mode="tcp")
+        res = await self.panel.test_outbound(outbound, mode="http")
         obj = res.get("obj", {}) if isinstance(res, dict) else {}
         return obj or {}
+
+    # ------------------------------------------------------------------ #
+    #  وضعیت سرویس‌ها (برای ادمین/همکار)
+    # ------------------------------------------------------------------ #
+    async def _ping_product(self, product: str) -> dict[str, Any]:
+        """یک اوتباند آزمایشی برای محصول می‌سازد و با حالت HTTP پینگ می‌گیرد."""
+        try:
+            loc = ProxyLocation(session=generate_session())
+            outbound = self._build_proxy_outbound(product, f"status-{product}", loc)
+            res = await self.panel.test_outbound(outbound, mode="http")
+            obj = res.get("obj", {}) if isinstance(res, dict) else {}
+            return {"ok": bool(obj.get("success")), "delay": obj.get("delay")}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "err": str(exc)[:150]}
+
+    async def service_status(self) -> dict[str, Any]:
+        """وضعیت سرور/پنل و سرویس‌های رزیدنتال و اینباند V2Ray را بررسی می‌کند.
+
+        اگر رزیدنتال پینگ ندهد یعنی سرویس‌های آن لوکیشن/پروایدر خاموش‌اند.
+        """
+        result: dict[str, Any] = {}
+        try:
+            inbounds = await self.panel.list_inbounds()
+            result["server_ok"] = True
+            result["inbounds"] = len(inbounds)
+        except Exception as exc:  # noqa: BLE001
+            result["server_ok"] = False
+            result["server_err"] = str(exc)[:150]
+
+        result["res1"] = await self._ping_product(PRODUCT_RESIDENTIAL)
+        if self.iproyal_username and self.iproyal_password and self.iproyal_host:
+            result["res2"] = await self._ping_product(PRODUCT_RESIDENTIAL2)
+        else:
+            result["res2"] = {"configured": False}
+
+        try:
+            ib = await self.panel.get_inbound(self.v2ray_inbound_id)
+            result["v2ray_inbound_ok"] = bool(ib)
+        except Exception:  # noqa: BLE001
+            result["v2ray_inbound_ok"] = False
+        return result
 
     def build_report(self) -> str:
         from .database import (
@@ -883,7 +984,7 @@ class Service:
         payer = self._payer_for(role, product)
         if payer not in ("admin", "postpaid"):
             raise ValueError("این مسیر فقط برای ادمین/همکار است.")
-        price = self.quote(role, product, volume_gb)
+        price = self.quote_for(buyer_tg_id, role, product, volume_gb)
         result = await self.provision_config(
             buyer_tg_id, location, volume_gb, life,
             product_type=product, price=price, payer=payer,
@@ -954,7 +1055,7 @@ class Service:
         if add_volume_gb < self.renew_min_volume_gb:
             raise ValueError(f"حداقل حجم تمدید {self.renew_min_volume_gb} گیگابایت است.")
         product = row["product_type"] or PRODUCT_RESIDENTIAL
-        price = self.quote(role, product, add_volume_gb)
+        price = self.quote_for(buyer_tg_id, role, product, add_volume_gb)
         payer = self._payer_for(role, product)
         if payer == "denied":
             raise PermissionError("اجازه‌ی تمدید این سرویس را ندارید.")
@@ -1085,7 +1186,8 @@ class Service:
         usd = self._payment_usd(row)
         if usd <= 0:
             raise ValueError("مبلغ نامعتبر است.")
-        pay_amount = self._unique_pay_amount(usd)
+        # مبلغ دقیقِ همان قیمت (بدون offset یکتا)؛ کاربر همین مبلغ را واریز می‌کند.
+        pay_amount = round(usd, 2)
         # بلاک شروع را می‌گیریم تا فقط واریزهای بعد از این لحظه معتبر باشند.
         start_block = 0
         try:

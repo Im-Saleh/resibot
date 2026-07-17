@@ -1,20 +1,23 @@
 """هندلرهای عمومی: /start، /id، منوی اصلی (شیشه‌ای) و منوی محصولات."""
 from __future__ import annotations
 
+from html import escape
+
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from ..config import Settings
 from ..database import (
+    Database,
     PRODUCT_RESIDENTIAL,
     PRODUCT_RESIDENTIAL2,
     PRODUCT_V2RAY,
     ROLE_RESIDENTIAL_RESELLER,
     ROLE_V2RAY_RESELLER,
 )
-from ..keyboards import main_menu, products_menu
+from ..keyboards import back_to_menu_kb, main_menu, products_menu
 from ..service import S_SHOW_PARTNERSHIP, Service
 
 router = Router(name="common")
@@ -47,9 +50,27 @@ def _menu_kb(service: Service, role: str, is_admin: bool):
 
 @router.message(CommandStart())
 async def cmd_start(
-    message: Message, state: FSMContext, cfg: Settings, service: Service, role: str, is_admin: bool
+    message: Message, state: FSMContext, cfg: Settings, service: Service,
+    db: Database, command: CommandObject, role: str, is_admin: bool,
 ) -> None:
     await state.clear()
+    # پردازش لینک رفرال: /start ref<آیدی معرف>
+    args = (command.args or "").strip()
+    if args.startswith("ref"):
+        try:
+            ref_id = int(args[3:])
+        except ValueError:
+            ref_id = 0
+        if ref_id and ref_id != message.from_user.id:
+            if db.set_referrer(message.from_user.id, ref_id):
+                try:
+                    await message.bot.send_message(
+                        ref_id,
+                        f"🎉 یک نفر با لینک دعوت شما وارد ربات شد (<code>{message.from_user.id}</code>).\n"
+                        "اگر خرید کند، درصد پاداش رفرال به کیف پول شما اضافه می‌شود.",
+                    )
+                except Exception:  # noqa: BLE001
+                    pass
     # کیبورد قدیمی پایین صفحه (reply) را حذف می‌کنیم تا فقط دکمه‌های شیشه‌ای بماند.
     try:
         await message.answer("⌛️", reply_markup=ReplyKeyboardRemove())
@@ -159,6 +180,76 @@ async def menu_guide(call: CallbackQuery) -> None:
 async def cmd_guide(message: Message) -> None:
     from ..keyboards import back_to_menu_kb
     await message.answer(GUIDE_TEXT, reply_markup=back_to_menu_kb())
+
+
+# ---------------------------------------------------------------------- #
+#  رفرال (دعوت دوستان)
+# ---------------------------------------------------------------------- #
+@router.callback_query(F.data == "menu:referral")
+async def menu_referral(call: CallbackQuery, service: Service, db: Database) -> None:
+    await call.answer()
+    uid = call.from_user.id
+    username = (db.get_setting("bot_username", "") or "").lstrip("@")
+    count = db.count_referrals(uid)
+    earn = db.ref_earnings(uid)
+    pct = service.referral_percent
+    if username:
+        link = f"https://t.me/{username}?start=ref{uid}"
+        link_line = f"🔗 لینک دعوت شما:\n<code>{escape(link)}</code>"
+    else:
+        link_line = f"🔗 کد دعوت شما: <code>ref{uid}</code>\n(لینک کامل به‌زودی فعال می‌شود)"
+    text = (
+        "👥 <b>دعوت دوستان (رفرال)</b>\n\n"
+        f"با هر خریدی که دعوت‌شده‌های شما انجام دهند، <b>{pct:g}%</b> مبلغ خرید به‌صورت "
+        f"اعتبار به کیف پول شما اضافه می‌شود. 🎁\n\n"
+        f"{link_line}\n\n"
+        f"👤 تعداد دعوت‌شده‌ها: <b>{count}</b>\n"
+        f"💰 مجموع پاداش دریافتی: <b>{earn:g} {service.currency}</b>\n\n"
+        "این لینک را برای دوستانتان بفرستید — وقتی از طریق آن وارد شوند و خرید کنند، سهم شما واریز می‌شود."
+    )
+    await call.message.answer(text, reply_markup=back_to_menu_kb())
+
+
+# ---------------------------------------------------------------------- #
+#  وضعیت سرویس‌ها (ادمین/همکار)
+# ---------------------------------------------------------------------- #
+def _status_report(st: dict) -> str:
+    lines = ["📊 <b>وضعیت سرویس‌ها</b>", ""]
+    if st.get("server_ok"):
+        lines.append(f"🖥 سرور / پنل: ✅ <b>اوکی</b> ({st.get('inbounds', 0)} اینباند)")
+    else:
+        lines.append("🖥 سرور / پنل: ❌ <b>در دسترس نیست</b>")
+        if st.get("server_err"):
+            lines.append(f"   └ <code>{escape(str(st['server_err']))}</code>")
+    r1 = st.get("res1", {})
+    if r1.get("ok"):
+        lines.append(f"🌐 رزیدنتال ۱: ✅ <b>اوکی</b> (پینگ {r1.get('delay', '?')} ms)")
+    else:
+        lines.append("🌐 رزیدنتال ۱: ❌ <b>آف</b> — پینگ نداد، یعنی سرویس‌های رزیدنتال ۱ خاموش‌اند")
+    r2 = st.get("res2", {})
+    if r2.get("configured") is False:
+        lines.append("🌍 رزیدنتال ۲: ⚪️ تنظیم نشده")
+    elif r2.get("ok"):
+        lines.append(f"🌍 رزیدنتال ۲: ✅ <b>اوکی</b> (پینگ {r2.get('delay', '?')} ms)")
+    else:
+        lines.append("🌍 رزیدنتال ۲: ❌ <b>آف</b> — پینگ نداد، یعنی سرویس‌های رزیدنتال ۲ خاموش‌اند")
+    lines.append(f"🛡 اینباند V2Ray: {'✅ اوکی' if st.get('v2ray_inbound_ok') else '❌ پیدا نشد'}")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "menu:status")
+async def menu_status(call: CallbackQuery, service: Service, role: str, is_admin: bool) -> None:
+    if not (is_admin or _is_reseller(role)):
+        await call.answer("این بخش فقط برای همکاران و ادمین است.", show_alert=True)
+        return
+    await call.answer()
+    wait = await call.message.answer("⏳ در حال بررسی وضعیت سرور و سرویس‌ها... (چند لحظه)")
+    try:
+        st = await service.service_status()
+    except Exception as exc:  # noqa: BLE001
+        await wait.edit_text(f"❌ خطا در بررسی وضعیت:\n<code>{escape(str(exc))}</code>")
+        return
+    await wait.edit_text(_status_report(st), reply_markup=back_to_menu_kb())
 
 
 @router.callback_query(F.data == "noop")
