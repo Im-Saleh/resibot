@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -60,6 +60,8 @@ class Database:
                 self._migrate_v3()
             if current < 4:
                 self._migrate_v4()
+            if current < 5:
+                self._migrate_v5()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -196,6 +198,40 @@ class Database:
             "CREATE INDEX IF NOT EXISTS idx_configs_customer ON configs(customer_tg_id)"
         )
         self._conn.commit()
+
+    def _migrate_v5(self) -> None:
+        """افزودن پشتیبانی پرداخت مستقیم کریپتو (USDT BEP20) به جدول payments.
+
+        همه‌ی تغییرات additive هستند و هیچ داده‌ای پاک نمی‌شود.
+          - method       : روش پرداخت ('nowpayments' یا 'crypto')
+          - pay_address   : آدرس مقصد کریپتو
+          - pay_amount    : مبلغ دقیق و یکتای USDT که باید واریز شود (برای تطبیق)
+          - pay_currency  : ارز/شبکه‌ی پرداخت (مثل 'USDT-BEP20')
+          - tx_hash       : هش تراکنش تأییدشده (هر هش فقط یک‌بار قابل‌استفاده)
+          - start_block   : شماره‌ی بلاک هنگام ساخت فاکتور (فقط واریزهای بعد از آن معتبرند)
+          - expires_at    : زمان انقضای فاکتور (unix seconds)
+        """
+        c = self._conn
+        for col, ddl in (
+            ("method", "ALTER TABLE payments ADD COLUMN method TEXT DEFAULT 'nowpayments'"),
+            ("pay_address", "ALTER TABLE payments ADD COLUMN pay_address TEXT DEFAULT ''"),
+            ("pay_amount", "ALTER TABLE payments ADD COLUMN pay_amount REAL DEFAULT 0"),
+            ("pay_currency", "ALTER TABLE payments ADD COLUMN pay_currency TEXT DEFAULT ''"),
+            ("tx_hash", "ALTER TABLE payments ADD COLUMN tx_hash TEXT DEFAULT ''"),
+            ("start_block", "ALTER TABLE payments ADD COLUMN start_block INTEGER DEFAULT 0"),
+            ("expires_at", "ALTER TABLE payments ADD COLUMN expires_at INTEGER DEFAULT 0"),
+        ):
+            if not self._column_exists("payments", col):
+                c.execute(ddl)
+        # هر هش تراکنش فقط یک‌بار می‌تواند یک پرداخت را credit کند (ضدتکرار/ری‌پلی).
+        # ایندکس جزئی تا رشته‌های خالی با هم تعارض نداشته باشند.
+        c.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_payments_txhash "
+            "ON payments(tx_hash) WHERE tx_hash != ''"
+        )
+        c.execute("CREATE INDEX IF NOT EXISTS idx_payments_status ON payments(status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_payments_method ON payments(method)")
+        c.commit()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -452,16 +488,91 @@ class Database:
     def create_payment(
         self, order_id: str, tg_id: int, amount: float, currency: str,
         purpose: str = "wallet_topup", meta: str = "",
+        *,
+        method: str = "nowpayments",
+        pay_address: str = "",
+        pay_amount: float = 0.0,
+        pay_currency: str = "",
+        start_block: int = 0,
+        expires_at: int = 0,
     ) -> int:
         now = int(time.time())
         with self._lock:
             cur = self._conn.execute(
-                "INSERT INTO payments(order_id, tg_id, amount, currency, purpose, status, meta, created_at, updated_at) "
-                "VALUES(?, ?, ?, ?, ?, 'waiting', ?, ?, ?)",
-                (order_id, tg_id, float(amount), currency, purpose, meta, now, now),
+                "INSERT INTO payments("
+                "order_id, tg_id, amount, currency, purpose, status, meta, "
+                "method, pay_address, pay_amount, pay_currency, start_block, expires_at, "
+                "created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, 'waiting', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    order_id, tg_id, float(amount), currency, purpose, meta,
+                    method, pay_address, float(pay_amount), pay_currency,
+                    int(start_block), int(expires_at), now, now,
+                ),
             )
             self._conn.commit()
             return int(cur.lastrowid)
+
+    # --- پرداخت مستقیم کریپتو (USDT BEP20) --- #
+    def list_waiting_crypto_payments(self) -> list[sqlite3.Row]:
+        """پرداخت‌های کریپتوی در انتظار و منقضی‌نشده و credit‌نشده."""
+        return self.query_all(
+            "SELECT * FROM payments "
+            "WHERE method = 'crypto' AND credited = 0 AND status = 'waiting'"
+        )
+
+    def waiting_crypto_pay_amounts(self) -> set:
+        """مجموعه‌ی مبالغ یکتای در حال استفاده (برای انتخاب offset بدون تداخل)."""
+        rows = self.query_all(
+            "SELECT pay_amount FROM payments "
+            "WHERE method = 'crypto' AND credited = 0 AND status = 'waiting'"
+        )
+        return {round(float(r["pay_amount"]), 6) for r in rows}
+
+    def tx_hash_used(self, tx_hash: str) -> bool:
+        row = self.query_one(
+            "SELECT 1 FROM payments WHERE tx_hash = ? AND tx_hash != ''",
+            (tx_hash.lower(),),
+        )
+        return row is not None
+
+    def credit_crypto_payment(self, order_id: str, tx_hash: str) -> Optional[sqlite3.Row]:
+        """به‌صورت اتمیک هش تراکنش را ثبت و پرداخت را credit می‌کند.
+
+        فقط اگر: پرداخت هنوز credit نشده باشد و همین هش قبلاً برای پرداخت دیگری
+        استفاده نشده باشد. در صورت موفقیت ردیف پرداخت را برمی‌گرداند؛ در غیر این
+        صورت None (تکراری/قبلاً پردازش‌شده/تداخل هش).
+        """
+        tx_hash = (tx_hash or "").lower()
+        with self._lock:
+            # اگر این هش قبلاً جای دیگری ثبت شده، رد کن (ضدری‌پلی).
+            used = self._conn.execute(
+                "SELECT 1 FROM payments WHERE tx_hash = ? AND tx_hash != '' AND order_id != ?",
+                (tx_hash, order_id),
+            ).fetchone()
+            if used is not None:
+                return None
+            cur = self._conn.execute(
+                "UPDATE payments SET credited = 1, status = 'finished', tx_hash = ?, "
+                "updated_at = ? WHERE order_id = ? AND credited = 0",
+                (tx_hash, int(time.time()), order_id),
+            )
+            self._conn.commit()
+            if cur.rowcount <= 0:
+                return None
+            return self._conn.execute(
+                "SELECT * FROM payments WHERE order_id = ?", (order_id,)
+            ).fetchone()
+
+    def expire_stale_crypto_payments(self) -> None:
+        """فاکتورهای کریپتوی منقضی‌شده‌ی credit‌نشده را به وضعیت expired می‌برد."""
+        now = int(time.time())
+        self.execute(
+            "UPDATE payments SET status = 'expired', updated_at = ? "
+            "WHERE method = 'crypto' AND status = 'waiting' AND credited = 0 "
+            "AND expires_at > 0 AND expires_at < ?",
+            (now, now),
+        )
 
     def get_payment_by_order(self, order_id: str) -> Optional[sqlite3.Row]:
         return self.query_one("SELECT * FROM payments WHERE order_id = ?", (order_id,))
@@ -477,6 +588,27 @@ class Database:
                 "UPDATE payments SET status = ?, updated_at = ? WHERE order_id = ?",
                 (status, int(time.time()), order_id),
             )
+
+    # ستون‌های مجاز برای به‌روزرسانی (whitelist سخت‌گیرانه؛ ضدتزریق SQL).
+    _PAYMENT_UPDATABLE = frozenset({
+        "method", "pay_address", "pay_amount", "pay_currency",
+        "start_block", "expires_at", "status", "invoice_id", "meta",
+    })
+
+    def update_payment(self, order_id: str, **fields: Any) -> None:
+        """به‌روزرسانی ایمن ستون‌های یک پرداخت. فقط ستون‌های whitelist‌شده مجازند.
+
+        نام ستون‌ها هرگز از ورودی کاربر ساخته نمی‌شوند؛ فقط از مجموعه‌ی ثابت
+        بالا انتخاب می‌شوند تا تزریق SQL غیرممکن باشد.
+        """
+        cols = [k for k in fields if k in self._PAYMENT_UPDATABLE]
+        if not cols:
+            return
+        set_clause = ", ".join(f"{c} = ?" for c in cols) + ", updated_at = ?"
+        params = [fields[c] for c in cols] + [int(time.time()), order_id]
+        self.execute(
+            f"UPDATE payments SET {set_clause} WHERE order_id = ?", params
+        )
 
     def credit_payment_once(self, order_id: str) -> Optional[sqlite3.Row]:
         """به‌صورت اتمیک پرداخت را credited=1 می‌کند فقط اگر قبلاً نشده باشد.

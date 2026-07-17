@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .config import Settings
+from .crypto import BscRpc, is_valid_address
 from .database import (
     Database,
     PRODUCT_RESIDENTIAL,
@@ -81,6 +82,18 @@ S_SHOW_PARTNERSHIP = "show_partnership"
 S_SHOW_RESIDENTIAL = "show_residential"
 S_SHOW_RESIDENTIAL2 = "show_residential2"
 S_SHOW_V2RAY = "show_v2ray"
+
+# روش‌های پرداخت (فعال/غیرفعال) و تنظیمات کریپتو
+S_PAY_CRYPTO_ENABLED = "pay_crypto_enabled"
+S_PAY_NOWPAYMENTS_ENABLED = "pay_nowpayments_enabled"
+S_CRYPTO_WALLET = "crypto_wallet_address"
+S_BSC_RPC = "bsc_rpc_url"
+S_CRYPTO_CONFIRMATIONS = "crypto_confirmations"
+
+# پلن V2Ray (یک‌ماهه نامحدود)
+S_V2RAY_INBOUND_ID = "v2ray_inbound_id"
+S_V2RAY_PLAN_PRICE = "v2ray_plan_price"
+S_V2RAY_PLAN_RESELLER_PRICE = "v2ray_plan_reseller_price"
 
 # نگاشت کلید نمایش هر محصول
 _PRODUCT_SHOW_KEY = {
@@ -147,6 +160,16 @@ class Service:
         self.db.seed_setting(S_SHOW_RESIDENTIAL, "1" if self.cfg.show_residential else "0")
         self.db.seed_setting(S_SHOW_RESIDENTIAL2, "1" if self.cfg.show_residential2 else "0")
         self.db.seed_setting(S_SHOW_V2RAY, "1" if self.cfg.show_v2ray else "0")
+        # روش‌های پرداخت + تنظیمات کریپتو
+        self.db.seed_setting(S_PAY_CRYPTO_ENABLED, "1" if self.cfg.pay_crypto_enabled else "0")
+        self.db.seed_setting(S_PAY_NOWPAYMENTS_ENABLED, "1" if self.cfg.pay_nowpayments_enabled else "0")
+        self.db.seed_setting(S_CRYPTO_WALLET, self.cfg.crypto_wallet_address)
+        self.db.seed_setting(S_BSC_RPC, self.cfg.bsc_rpc_url)
+        self.db.seed_setting(S_CRYPTO_CONFIRMATIONS, str(self.cfg.crypto_confirmations))
+        # پلن V2Ray
+        self.db.seed_setting(S_V2RAY_INBOUND_ID, str(self.cfg.v2ray_inbound_id))
+        self.db.seed_setting(S_V2RAY_PLAN_PRICE, str(self.cfg.v2ray_plan_price))
+        self.db.seed_setting(S_V2RAY_PLAN_RESELLER_PRICE, str(self.cfg.v2ray_plan_reseller_price))
 
     @property
     def server_ip(self) -> str:
@@ -237,6 +260,59 @@ class Service:
     def product_enabled(self, product: str) -> bool:
         key = _PRODUCT_SHOW_KEY.get(product)
         return True if key is None else self.feature_enabled(key)
+
+    # --- روش‌های پرداخت ---
+    @property
+    def crypto_enabled(self) -> bool:
+        return self.feature_enabled(S_PAY_CRYPTO_ENABLED) and is_valid_address(self.crypto_wallet_address)
+
+    @property
+    def nowpayments_enabled(self) -> bool:
+        return self.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED) and bool(
+            self.nowpayments is not None and self.cfg.nowpayments_enabled
+        )
+
+    def enabled_pay_methods(self) -> list[str]:
+        methods: list[str] = []
+        if self.crypto_enabled:
+            methods.append("crypto")
+        if self.nowpayments_enabled:
+            methods.append("nowpayments")
+        return methods
+
+    @property
+    def crypto_wallet_address(self) -> str:
+        return (self.db.get_setting(S_CRYPTO_WALLET, self.cfg.crypto_wallet_address) or "").strip()
+
+    @property
+    def bsc_rpc_url(self) -> str:
+        return (self.db.get_setting(S_BSC_RPC, self.cfg.bsc_rpc_url) or "").strip()
+
+    @property
+    def crypto_confirmations(self) -> int:
+        return max(1, self._isetting(S_CRYPTO_CONFIRMATIONS, self.cfg.crypto_confirmations))
+
+    # --- پلن V2Ray ---
+    @property
+    def v2ray_inbound_id(self) -> int:
+        return self._isetting(S_V2RAY_INBOUND_ID, self.cfg.v2ray_inbound_id)
+
+    @property
+    def v2ray_plan_days(self) -> int:
+        return max(1, self.cfg.v2ray_plan_days)
+
+    @property
+    def v2ray_plan_price(self) -> float:
+        return self._fsetting(S_V2RAY_PLAN_PRICE, self.cfg.v2ray_plan_price)
+
+    @property
+    def v2ray_plan_reseller_price(self) -> float:
+        return self._fsetting(S_V2RAY_PLAN_RESELLER_PRICE, self.cfg.v2ray_plan_reseller_price)
+
+    def v2ray_plan_price_for(self, role: str) -> float:
+        if role == ROLE_V2RAY_RESELLER:
+            return self.v2ray_plan_reseller_price
+        return self.v2ray_plan_price
 
     @property
     def v2ray_price_per_gb(self) -> float:
@@ -918,3 +994,227 @@ class Service:
             "usd_amount": usd_amount,
             "pay_currency": self.cfg.nowpayments_pay_currency,
         }
+
+
+    # ================================================================== #
+    #  پرداخت یکپارچه (کریپتو مستقیم یا NowPayments) — انتخاب روش
+    # ================================================================== #
+    def _new_order_id(self, tg_id: int, kind: str) -> str:
+        return f"{self.cfg.brand_name}-{kind}-{int(tg_id)}-{secrets.token_hex(5)}"
+
+    def _unique_pay_amount(self, usd: float) -> float:
+        """یک مبلغ USDT یکتا برای تطبیق واریز می‌سازد (پایه + offset کوچک بی‌تداخل)."""
+        base = round(float(usd), 2)
+        used = self.db.waiting_crypto_pay_amounts()
+        for k in range(1, 900):
+            cand = round(base + k * 0.001, 3)
+            if round(cand, 6) not in used:
+                return cand
+        return round(base + random.randint(1, 999) / 1000.0, 3)
+
+    def create_order_payment(
+        self, tg_id: int, *, product: str, usd: float, meta_extra: dict[str, Any],
+    ) -> str:
+        """یک فاکتور «سفارش محصول» می‌سازد (روش پرداخت هنوز انتخاب نشده)."""
+        usd = round(float(usd), 2)
+        if usd <= 0:
+            raise ValueError("مبلغ نامعتبر است.")
+        meta = dict(meta_extra)
+        meta["product"] = product
+        meta["usd"] = usd
+        order_id = self._new_order_id(tg_id, "ord")
+        self.db.create_payment(
+            order_id, tg_id, usd, self.residential_currency,
+            purpose="order", meta=json.dumps(meta), method="",
+        )
+        return order_id
+
+    def create_topup_payment(self, tg_id: int, amount_toman: float) -> tuple[str, float]:
+        """یک فاکتور «شارژ کیف پول» می‌سازد. برمی‌گرداند (order_id, usd)."""
+        amount_toman = round(float(amount_toman), 2)
+        if amount_toman <= 0:
+            raise ValueError("مبلغ نامعتبر است.")
+        usd = round(amount_toman / self.toman_per_usd, 2)
+        if usd <= 0:
+            raise ValueError("مبلغ خیلی کم است.")
+        meta = json.dumps({"usd": usd})
+        order_id = self._new_order_id(tg_id, "top")
+        self.db.create_payment(
+            order_id, tg_id, amount_toman, self.cfg.wallet_currency,
+            purpose="wallet_topup", meta=meta, method="",
+        )
+        return order_id, usd
+
+    def _payment_usd(self, row) -> float:
+        try:
+            meta = json.loads(row["meta"] or "{}")
+        except (TypeError, ValueError):
+            meta = {}
+        usd = meta.get("usd")
+        if usd is None:
+            # فالبک: برای سفارش، amount همان دلار است.
+            usd = float(row["amount"]) if row["purpose"] == "order" else 0.0
+        return round(float(usd), 2)
+
+    async def prepare_crypto_payment(self, order_id: str) -> dict[str, Any]:
+        """فاکتور را برای پرداخت مستقیم USDT (BEP20) آماده می‌کند.
+
+        مبلغ یکتا تعیین، آدرس مقصد و بلاک شروع ثبت و زمان انقضا تنظیم می‌شود.
+        """
+        if not self.crypto_enabled:
+            raise ValueError("پرداخت مستقیم کریپتو در حال حاضر فعال نیست.")
+        row = self.db.get_payment_by_order(order_id)
+        if not row:
+            raise ValueError("فاکتور پیدا نشد.")
+        wallet = self.crypto_wallet_address
+        if not is_valid_address(wallet):
+            raise ValueError("آدرس ولت مقصد نامعتبر است. با ادمین هماهنگ کنید.")
+        usd = self._payment_usd(row)
+        if usd <= 0:
+            raise ValueError("مبلغ نامعتبر است.")
+        pay_amount = self._unique_pay_amount(usd)
+        # بلاک شروع را می‌گیریم تا فقط واریزهای بعد از این لحظه معتبر باشند.
+        start_block = 0
+        try:
+            start_block = await BscRpc(self.bsc_rpc_url).block_number()
+        except Exception:  # noqa: BLE001
+            logger.warning("گرفتن شماره بلاک اولیه ناموفق بود (ادامه با 0)")
+        expires_at = int(time.time()) + self.cfg.crypto_payment_ttl_min * 60
+        self.db.update_payment(
+            order_id,
+            method="crypto",
+            pay_address=wallet,
+            pay_amount=pay_amount,
+            pay_currency="USDT-BEP20",
+            start_block=start_block,
+            expires_at=expires_at,
+            status="waiting",
+        )
+        return {
+            "order_id": order_id,
+            "address": wallet,
+            "pay_amount": pay_amount,
+            "network": "BEP20 (BSC)",
+            "expires_at": expires_at,
+            "ttl_min": self.cfg.crypto_payment_ttl_min,
+            "confirmations": self.crypto_confirmations,
+        }
+
+    async def prepare_nowpayments_payment(self, order_id: str) -> dict[str, Any]:
+        """فاکتور را از طریق درگاه NowPayments آماده می‌کند (USDT BEP20)."""
+        if not self.nowpayments_enabled:
+            raise ValueError("درگاه پرداخت در حال حاضر فعال نیست.")
+        row = self.db.get_payment_by_order(order_id)
+        if not row:
+            raise ValueError("فاکتور پیدا نشد.")
+        usd = self._payment_usd(row)
+        if usd <= 0:
+            raise ValueError("مبلغ نامعتبر است.")
+        ipn_url = self.cfg.ipn_callback_url(self.server_ip)
+        desc = f"{row['purpose']} for {row['tg_id']} ({self.cfg.brand_full})"
+        try:
+            inv = await self.nowpayments.create_invoice(
+                price_amount=usd,
+                price_currency=self.cfg.nowpayments_price_currency,
+                order_id=order_id,
+                order_description=desc,
+                ipn_callback_url=ipn_url,
+                pay_currency=self.cfg.nowpayments_pay_currency,
+            )
+        except Exception:
+            self.db.update_payment(order_id, method="nowpayments", status="failed")
+            raise
+        self.db.update_payment(
+            order_id, method="nowpayments", status="waiting",
+            invoice_id=str(inv.get("id") or ""),
+        )
+        return {"order_id": order_id, "invoice_url": inv.get("invoice_url"), "usd": usd}
+
+    def settle_crypto_payment(self, order_id: str, tx_hash: str):
+        """به‌صورت اتمیک یک فاکتور کریپتو را credit می‌کند (ضدتکرار). ردیف یا None."""
+        return self.db.credit_crypto_payment(order_id, tx_hash)
+
+    # ================================================================== #
+    #  پلن V2Ray (یک‌ماهه نامحدود روی اینباند موجود)
+    # ================================================================== #
+    async def provision_v2ray(
+        self, owner_tg_id: int, *, price: float = 0.0, payer: str = "",
+    ) -> dict[str, Any]:
+        """یک کلاینت V2Ray نامحدود (۳۰ روزه) روی اینباند از پیش‌ساخته می‌سازد.
+
+        totalGB=0 در 3x-ui یعنی حجم نامحدود.
+        """
+        inbound_id = self.v2ray_inbound_id
+        inbound = await self.panel.get_inbound(inbound_id)
+        if not inbound:
+            raise PanelError(f"اینباند V2Ray با شناسه {inbound_id} در پنل پیدا نشد.")
+        port = int(inbound.get("port", 0) or 0)
+        inbound_tag = inbound.get("tag") or f"inbound-{inbound_id}"
+
+        uuid = await self.panel.get_new_uuid()
+        token = secrets.token_hex(4)
+        email = f"v{owner_tg_id}-{token}"
+        sub_id = secrets.token_hex(8)
+        days = self.v2ray_plan_days
+        expiry_ms = int((time.time() + days * 86400) * 1000)
+
+        # totalGB=0 → نامحدود
+        client = build_client(uuid, email, sub_id, 0, expiry_ms)
+        await self.panel.add_client(inbound_id, client)
+
+        ps = await self._panel_settings()
+        sub_link = self._sub_link_for(ps, sub_id)
+        try:
+            vless_links = await self.panel.get_client_links(inbound_id, email)
+        except PanelError:
+            vless_links = []
+
+        config_id = self.db.add_config(
+            {
+                "owner_tg_id": owner_tg_id,
+                "inbound_id": inbound_id,
+                "port": port,
+                "client_uuid": uuid,
+                "client_email": email,
+                "sub_id": sub_id,
+                "outbound_tag": "",
+                "inbound_tag": inbound_tag,
+                "volume_gb": 0,  # نامحدود
+                "duration_days": days,
+                "expiry_ms": expiry_ms,
+                "area": "", "state": "", "city": "",
+                "life": 0, "session": "",
+                "created_at": int(time.time()),
+                "active": 1,
+                "product_type": PRODUCT_V2RAY,
+                "price": float(price),
+                "payer": payer,
+            }
+        )
+        return {
+            "config_id": config_id,
+            "sub_link": sub_link,
+            "vless_links": vless_links or [],
+            "expiry_ms": expiry_ms,
+            "days": days,
+        }
+
+    async def renew_v2ray(self, config_id: int, *, price: float = 0.0) -> dict[str, Any]:
+        """تمدید پلن V2Ray: انقضا از «همین لحظه» به ۳۰ روز بعد ریست می‌شود (نه افزودنی).
+
+        حجم نامحدود می‌ماند.
+        """
+        row = self.db.get_config(config_id)
+        if not row:
+            raise ValueError("سرویس پیدا نشد.")
+        if (row["product_type"] or "") != PRODUCT_V2RAY:
+            raise ValueError("این سرویس V2Ray نیست.")
+        days = self.v2ray_plan_days
+        new_expiry_ms = int((time.time() + days * 86400) * 1000)  # ریست از همین لحظه
+        client = build_client(
+            row["client_uuid"], row["client_email"], row["sub_id"], 0, new_expiry_ms,
+        )
+        await self.panel.update_client(row["inbound_id"], row["client_uuid"], client)
+        # حجم نامحدود (0) حفظ می‌شود؛ فقط انقضا ریست و مبلغ به قیمت کل اضافه می‌شود.
+        self.db.renew_config(config_id, 0, new_expiry_ms, price)
+        return {"config_id": config_id, "new_expiry_ms": new_expiry_ms, "days": days, "price": float(price)}

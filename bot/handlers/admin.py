@@ -17,10 +17,12 @@ from ..database import (
     ROLE_USER,
     ROLE_V2RAY_RESELLER,
 )
+from ..crypto import is_valid_address
 from ..keyboards import (
     admin_panel_menu,
     configs_list_keyboard,
     custbot_menu,
+    payments_admin_menu,
     prices_menu,
     request_decision_keyboard,
     settings_menu,
@@ -29,12 +31,17 @@ from ..keyboards import (
     users_menu,
 )
 from ..service import (
+    S_BSC_RPC,
+    S_CRYPTO_CONFIRMATIONS,
+    S_CRYPTO_WALLET,
     S_HOST,
     S_IPROYAL_HOST,
     S_IPROYAL_PASSWORD,
     S_IPROYAL_PORT,
     S_IPROYAL_USERNAME,
     S_MIN_VOLUME,
+    S_PAY_CRYPTO_ENABLED,
+    S_PAY_NOWPAYMENTS_ENABLED,
     S_PRICE,
     S_RENEW_MIN_VOLUME,
     S_RESELLER_MIN_BALANCE,
@@ -48,6 +55,9 @@ from ..service import (
     S_SHOW_V2RAY,
     S_SNI,
     S_TOMAN_PER_USD,
+    S_V2RAY_INBOUND_ID,
+    S_V2RAY_PLAN_PRICE,
+    S_V2RAY_PLAN_RESELLER_PRICE,
     S_V2RAY_PRICE,
     S_V2RAY_RESELLER_PRICE,
     Service,
@@ -72,6 +82,14 @@ async def panel_root(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     pending = len(db.list_pending_requests())
     await message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_menu(pending))
+
+
+@router.callback_query(F.data == "menu:admin")
+async def panel_root_cb(call: CallbackQuery, state: FSMContext, db: Database) -> None:
+    await state.clear()
+    await call.answer()
+    pending = len(db.list_pending_requests())
+    await call.message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_menu(pending))
 
 
 @router.callback_query(F.data == "adm:report")
@@ -345,6 +363,63 @@ async def adm_prices(call: CallbackQuery, service: Service) -> None:
     await call.message.answer(text, reply_markup=prices_menu())
 
 
+# ====================================================================== #
+#  روش‌های پرداخت + تنظیمات کریپتو و پلن V2Ray
+# ====================================================================== #
+def _pay_kb(service: Service):
+    return payments_admin_menu(
+        crypto_on=service.feature_enabled(S_PAY_CRYPTO_ENABLED),
+        nowpayments_on=service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED),
+    )
+
+
+def _pay_text(service: Service) -> str:
+    wallet = service.crypto_wallet_address or "—"
+    wallet_ok = "✅ معتبر" if is_valid_address(wallet) else "⛔️ نامعتبر"
+    return (
+        "💳 <b>روش‌های پرداخت</b>\n\n"
+        f"• پرداخت مستقیم USDT: {'فعال ✅' if service.feature_enabled(S_PAY_CRYPTO_ENABLED) else 'غیرفعال ❌'}\n"
+        f"• درگاه NowPayments: {'فعال ✅' if service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED) else 'غیرفعال ❌'}\n\n"
+        "💠 <b>پرداخت مستقیم (USDT روی BEP20)</b>\n"
+        f"👛 ولت مقصد: <code>{escape(wallet)}</code> ({wallet_ok})\n"
+        f"🔗 RPC: <code>{escape(service.bsc_rpc_url or '—')}</code>\n"
+        f"🔒 تأیید لازم: <b>{service.crypto_confirmations}</b>\n\n"
+        "🛡 <b>پلن V2Ray (یک‌ماهه نامحدود)</b>\n"
+        f"• شناسه اینباند: <b>{service.v2ray_inbound_id}</b>\n"
+        f"• قیمت عادی: <b>{service.v2ray_plan_price:g} USDT</b>\n"
+        f"• قیمت همکار: <b>{service.v2ray_plan_reseller_price:g} USDT</b>\n\n"
+        "برای تغییر، یکی را انتخاب کنید:"
+    )
+
+
+@router.callback_query(F.data == "adm:pay")
+async def adm_pay(call: CallbackQuery, service: Service) -> None:
+    await call.answer()
+    await call.message.answer(_pay_text(service), reply_markup=_pay_kb(service))
+
+
+_PAY_TOGGLE_KEYS = {
+    "crypto": (S_PAY_CRYPTO_ENABLED, "پرداخت مستقیم USDT"),
+    "nowpayments": (S_PAY_NOWPAYMENTS_ENABLED, "درگاه NowPayments"),
+}
+
+
+@router.callback_query(F.data.startswith("paytgl:"))
+async def adm_pay_toggle(call: CallbackQuery, service: Service) -> None:
+    key = call.data.split(":", 1)[1]
+    entry = _PAY_TOGGLE_KEYS.get(key)
+    if not entry:
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    setting_key, label = entry
+    new_val = service.toggle_feature(setting_key)
+    await call.answer(f"{label}: {'فعال شد ✅' if new_val else 'غیرفعال شد ❌'}")
+    try:
+        await call.message.edit_text(_pay_text(service), reply_markup=_pay_kb(service))
+    except Exception:  # noqa: BLE001
+        pass
+
+
 @router.callback_query(F.data == "adm:settings")
 async def adm_settings(call: CallbackQuery, service: Service) -> None:
     await call.answer()
@@ -386,6 +461,12 @@ _SETTING_PROMPTS = {
     "iproyal_port": (AdminStates.set_iproyal_port, "پورت سرور رزیدنتال ۲ را بفرستید:"),
     "iproyal_username": (AdminStates.set_iproyal_username, "یوزرنیم سرور رزیدنتال ۲ را بفرستید:"),
     "iproyal_password": (AdminStates.set_iproyal_password, "پسورد پایه‌ی سرور رزیدنتال ۲ را بفرستید:"),
+    "crypto_wallet": (AdminStates.set_crypto_wallet, "آدرس ولت مقصد USDT (شبکه BEP20) را بفرستید — فرمت 0x و ۴۰ رقم هگز:"),
+    "bsc_rpc": (AdminStates.set_bsc_rpc, "آدرس RPC شبکه BSC را بفرستید (مثل https://bsc-dataseed.binance.org):"),
+    "crypto_conf": (AdminStates.set_crypto_conf, "تعداد تأیید لازم قبل از تحویل را بفرستید (مثلاً 12):"),
+    "v2ray_inbound": (AdminStates.set_v2ray_inbound, "شناسه عددی اینباند V2Ray در پنل را بفرستید (مثلاً 6):"),
+    "v2ray_plan_price": (AdminStates.set_v2ray_plan_price, "قیمت پلن V2Ray عادی (USDT) را بفرستید:"),
+    "v2ray_plan_reseller": (AdminStates.set_v2ray_plan_reseller, "قیمت پلن V2Ray همکار (USDT) را بفرستید:"),
 }
 
 
@@ -505,6 +586,55 @@ async def s_iproyal_password(message: Message, state: FSMContext, service: Servi
     _save_text(service, S_IPROYAL_PASSWORD, message.text or "")
     await state.clear()
     await message.answer("✅ پسورد پایه‌ی رزیدنتال ۲ به‌روزرسانی شد.")
+
+
+@router.message(AdminStates.set_crypto_wallet)
+async def s_crypto_wallet(message: Message, state: FSMContext, service: Service) -> None:
+    addr = (message.text or "").strip()
+    if not is_valid_address(addr):
+        await message.answer(
+            "⛔️ آدرس نامعتبر است. باید با <code>0x</code> شروع شود و دقیقاً ۴۰ رقم هگز داشته باشد.\n"
+            "دوباره بفرستید:"
+        )
+        return
+    service.set_setting(S_CRYPTO_WALLET, addr)
+    await state.clear()
+    await message.answer(
+        "✅ آدرس ولت مقصد به‌روزرسانی شد.\n"
+        f"👛 <code>{escape(addr)}</code>\n\n"
+        "فاکتورهای جدید به همین آدرس هدایت می‌شوند."
+    )
+
+
+@router.message(AdminStates.set_bsc_rpc)
+async def s_bsc_rpc(message: Message, state: FSMContext, service: Service) -> None:
+    url = (message.text or "").strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await message.answer("⛔️ آدرس RPC باید با http:// یا https:// شروع شود. دوباره بفرستید:")
+        return
+    service.set_setting(S_BSC_RPC, url[:253])
+    await state.clear()
+    await message.answer("✅ آدرس RPC شبکه BSC به‌روزرسانی شد.")
+
+
+@router.message(AdminStates.set_crypto_conf)
+async def s_crypto_conf(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_int(message, state, service, S_CRYPTO_CONFIRMATIONS, "تعداد تأیید لازم")
+
+
+@router.message(AdminStates.set_v2ray_inbound)
+async def s_v2ray_inbound(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_int(message, state, service, S_V2RAY_INBOUND_ID, "شناسه اینباند V2Ray")
+
+
+@router.message(AdminStates.set_v2ray_plan_price)
+async def s_v2ray_plan_price(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_float(message, state, service, S_V2RAY_PLAN_PRICE, "قیمت پلن V2Ray عادی")
+
+
+@router.message(AdminStates.set_v2ray_plan_reseller)
+async def s_v2ray_plan_reseller(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_float(message, state, service, S_V2RAY_PLAN_RESELLER_PRICE, "قیمت پلن V2Ray همکار")
 
 
 @router.message(AdminStates.set_v2ray_price)

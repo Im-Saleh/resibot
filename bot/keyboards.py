@@ -12,25 +12,67 @@ from . import countries, locations
 
 
 # ---------------------------------------------------------------------- #
-#  منوهای اصلی (reply keyboard) — نقش‌محور
+#  منوی اصلی — دکمه‌های شیشه‌ای (inline)
 # ---------------------------------------------------------------------- #
 def main_menu(
     *,
     is_admin: bool = False,
     is_reseller: bool = False,
     show_partnership: bool = True,
-) -> ReplyKeyboardMarkup:
-    second_row = [KeyboardButton(text="💼 کیف پول")]
+) -> InlineKeyboardMarkup:
+    """منوی اصلی به‌صورت دکمه‌های شیشه‌ای (inline).
+
+    چون inline است، هر بار وضعیت لحظه‌ای را نشان می‌دهد؛ پس مخفی‌کردن دکمه‌ی
+    «همکاری» بلافاصله اعمال می‌شود (برخلاف کیبورد reply که روی گوشی باقی می‌ماند).
+    """
+    second_row = [InlineKeyboardButton(text="💼 کیف پول", callback_data="menu:wallet")]
     # دکمه‌ی همکاری فقط وقتی فعال باشد نمایش داده می‌شود (برای ادمین همیشه)
     if show_partnership or is_admin:
-        second_row.append(KeyboardButton(text="🤝 همکاری"))
+        second_row.append(InlineKeyboardButton(text="🤝 همکاری", callback_data="menu:partner"))
     rows = [
-        [KeyboardButton(text="🛒 خرید سرویس"), KeyboardButton(text="🧾 سرویس‌های من")],
+        [
+            InlineKeyboardButton(text="🛒 خرید سرویس", callback_data="menu:buy"),
+            InlineKeyboardButton(text="🧾 سرویس‌های من", callback_data="menu:configs"),
+        ],
         second_row,
     ]
     if is_admin:
-        rows.append([KeyboardButton(text="🛠 پنل مدیریت")])
-    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+        rows.append([InlineKeyboardButton(text="🛠 پنل مدیریت", callback_data="menu:admin")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def back_to_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home")]]
+    )
+
+
+# ---------------------------------------------------------------------- #
+#  انتخاب روش پرداخت (برای سفارش‌ها و شارژ کیف پول)
+# ---------------------------------------------------------------------- #
+def pay_methods_keyboard(order_id: str, methods: list[str]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if "crypto" in methods:
+        rows.append([InlineKeyboardButton(
+            text="💠 پرداخت مستقیم USDT (BEP20)", callback_data=f"pm:crypto:{order_id}"
+        )])
+    if "nowpayments" in methods:
+        rows.append([InlineKeyboardButton(
+            text="🌐 پرداخت با درگاه", callback_data=f"pm:now:{order_id}"
+        )])
+    rows.append([InlineKeyboardButton(text="❌ انصراف", callback_data=f"pm:cancel:{order_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def crypto_paid_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """دکمه‌های صفحه‌ی پرداخت کریپتو: ثبت هش و بررسی مجدد."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧾 ارسال هش تراکنش / لینک", callback_data=f"cx:tx:{order_id}")],
+            [InlineKeyboardButton(text="🔄 بررسی وضعیت پرداخت", callback_data=f"cx:chk:{order_id}")],
+            [InlineKeyboardButton(text="❌ انصراف", callback_data=f"pm:cancel:{order_id}")],
+        ]
+    )
 
 
 # ---------------------------------------------------------------------- #
@@ -343,9 +385,33 @@ def admin_panel_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💳 شارژ دستی کیف پول", callback_data="adm:credit")],
             [InlineKeyboardButton(text="📣 پیام همگانی", callback_data="adm:broadcast")],
             [InlineKeyboardButton(text="💵 قیمت‌ها", callback_data="adm:prices")],
+            [InlineKeyboardButton(text="💳 روش‌های پرداخت", callback_data="adm:pay")],
             [InlineKeyboardButton(text="⚙️ تنظیمات سرور", callback_data="adm:settings")],
             [InlineKeyboardButton(text="🔀 نمایش/مخفی‌سازی بخش‌ها", callback_data="adm:toggles")],
             [InlineKeyboardButton(text="🤖 ربات کمکی مشتری", callback_data="adm:custbot")],
+        ]
+    )
+
+
+def payments_admin_menu(*, crypto_on: bool, nowpayments_on: bool) -> InlineKeyboardMarkup:
+    """منوی مدیریت روش‌های پرداخت + تنظیمات کریپتو و پلن V2Ray."""
+    def mark(on: bool) -> str:
+        return "✅" if on else "❌"
+
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{mark(crypto_on)} پرداخت مستقیم USDT (BEP20)", callback_data="paytgl:crypto"
+            )],
+            [InlineKeyboardButton(
+                text=f"{mark(nowpayments_on)} درگاه NowPayments", callback_data="paytgl:nowpayments"
+            )],
+            [InlineKeyboardButton(text="👛 آدرس ولت مقصد (USDT BEP20)", callback_data="set:crypto_wallet")],
+            [InlineKeyboardButton(text="🔗 آدرس RPC شبکه BSC", callback_data="set:bsc_rpc")],
+            [InlineKeyboardButton(text="🔒 تعداد تأیید لازم", callback_data="set:crypto_conf")],
+            [InlineKeyboardButton(text="🛡 شناسه اینباند V2Ray", callback_data="set:v2ray_inbound")],
+            [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (عادی)", callback_data="set:v2ray_plan_price")],
+            [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (همکار)", callback_data="set:v2ray_plan_reseller")],
         ]
     )
 

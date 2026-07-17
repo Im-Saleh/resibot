@@ -141,7 +141,39 @@ class Settings:
     nowpayments_ipn_secret: str = field(default_factory=lambda: _get("NOWPAYMENTS_IPN_SECRET"))
     nowpayments_public_key: str = field(default_factory=lambda: _get("NOWPAYMENTS_PUBLIC_KEY"))
     nowpayments_price_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PRICE_CURRENCY", "usd"))
-    nowpayments_pay_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PAY_CURRENCY", "usdttrc20"))
+    # ارز پرداخت پیش‌فرض درگاه؛ حالا USDT روی شبکه‌ی BEP20 (BSC)
+    nowpayments_pay_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PAY_CURRENCY", "usdtbsc"))
+
+    # --- پرداخت مستقیم کریپتو (USDT BEP20 / BSC) ---
+    # آدرس مقصد که پول مستقیم به آن واریز می‌شود (بدون واسطه، بدون فی انتقال).
+    crypto_wallet_address: str = field(
+        default_factory=lambda: _get(
+            "CRYPTO_WALLET_ADDRESS", "0x0E2D801A5A769d7C508C0602E70cec3D1386943D"
+        )
+    )
+    # نقطه‌ی اتصال JSON-RPC شبکه‌ی BSC (رصد فقط-خواندنی؛ هیچ کلید خصوصی لازم نیست).
+    # پیش‌فرض: bsc-dataseed که برای «تأیید دستی با هش» (receipt) کاملاً پایدار
+    # است و همه‌جا کار می‌کند. برای «تأیید خودکار» به RPCی نیاز است که
+    # eth_getLogs را پشتیبانی کند (مثل QuickNode/Alchemy/Ankr یا نود اختصاصی).
+    bsc_rpc_url: str = field(
+        default_factory=lambda: _get("BSC_RPC_URL", "https://bsc-dataseed.binance.org")
+    )
+    # تعداد تأییدهای لازم قبل از تحویل (ضدتقلب/ری‌ارگ).
+    crypto_confirmations: int = field(default_factory=lambda: _get_int("CRYPTO_CONFIRMATIONS", 12))
+    # مدت اعتبار هر فاکتور کریپتو به دقیقه (پس از آن منقضی می‌شود).
+    crypto_payment_ttl_min: int = field(default_factory=lambda: _get_int("CRYPTO_PAYMENT_TTL_MIN", 60))
+    # فعال/غیرفعال بودن هر روش پرداخت (مقدار اولیه؛ در دیتابیس ماندگار می‌شود).
+    pay_crypto_enabled: bool = field(default_factory=lambda: _get_bool("PAY_CRYPTO_ENABLED", True))
+    pay_nowpayments_enabled: bool = field(default_factory=lambda: _get_bool("PAY_NOWPAYMENTS_ENABLED", True))
+
+    # --- پلن V2Ray (یک‌ماهه نامحدود روی اینباند موجود) ---
+    # شناسه‌ی اینباند از پیش‌ساخته‌شده در پنل که کلاینت V2Ray در آن ساخته می‌شود.
+    v2ray_inbound_id: int = field(default_factory=lambda: _get_int("V2RAY_INBOUND_ID", 6))
+    # مدت اعتبار پلن V2Ray به روز (با هر تمدید از همان لحظه ریست می‌شود).
+    v2ray_plan_days: int = field(default_factory=lambda: _get_int("V2RAY_PLAN_DAYS", 30))
+    # قیمت ثابت پلن V2Ray یک‌ماهه‌ی نامحدود (دلار/تتر) — عادی و همکار.
+    v2ray_plan_price: float = field(default_factory=lambda: _get_float("V2RAY_PLAN_PRICE", 5.0))
+    v2ray_plan_reseller_price: float = field(default_factory=lambda: _get_float("V2RAY_PLAN_RESELLER_PRICE", 3.5))
     # آدرس عمومی برای IPN؛ اگر خالی باشد خودکار از IP سرور ساخته می‌شود.
     public_base_url: str = field(default_factory=lambda: _get("PUBLIC_BASE_URL").rstrip("/"))
     ipn_host: str = field(default_factory=lambda: _get("IPN_HOST", "0.0.0.0"))
