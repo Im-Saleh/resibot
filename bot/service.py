@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from .config import Settings
-from .crypto import BscRpc, is_valid_address
+from .crypto import DEFAULT_BSC_RPCS, RpcPool, is_valid_address
 from .database import (
     Database,
     PRODUCT_RESIDENTIAL,
@@ -287,6 +287,19 @@ class Service:
     @property
     def bsc_rpc_url(self) -> str:
         return (self.db.get_setting(S_BSC_RPC, self.cfg.bsc_rpc_url) or "").strip()
+
+    @property
+    def bsc_rpc_urls(self) -> list[str]:
+        """لیست RPCها برای استخر failover: RPC تنظیم‌شده‌ی ادمین + لیست رایگان پیش‌فرض.
+
+        RPC ادمین اول قرار می‌گیرد؛ بقیه به‌عنوان پشتیبان اگر یکی خراب/محدود شد.
+        """
+        primary = self.bsc_rpc_url
+        urls = ([primary] if primary else []) + list(DEFAULT_BSC_RPCS)
+        return urls
+
+    def make_rpc_pool(self) -> RpcPool:
+        return RpcPool(self.bsc_rpc_urls)
 
     @property
     def crypto_confirmations(self) -> int:
@@ -1076,7 +1089,7 @@ class Service:
         # بلاک شروع را می‌گیریم تا فقط واریزهای بعد از این لحظه معتبر باشند.
         start_block = 0
         try:
-            start_block = await BscRpc(self.bsc_rpc_url).block_number()
+            start_block = await self.make_rpc_pool().block_number()
         except Exception:  # noqa: BLE001
             logger.warning("گرفتن شماره بلاک اولیه ناموفق بود (ادامه با 0)")
         expires_at = int(time.time()) + self.cfg.crypto_payment_ttl_min * 60

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+from typing import Any
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -11,12 +12,12 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import ConfigError, settings
-from .crypto import BscRpc, CryptoWatcher
+from .crypto import CryptoWatcher
 from .database import Database
 from .fulfillment import deliver_paid_order
 from .handlers import register_handlers
 from .ipn import start_ipn_server
-from .middlewares import ContextMiddleware
+from .middlewares import ContextMiddleware, ThrottleMiddleware
 from .nowpayments import NowPaymentsClient
 from .panel import PanelClient
 from .service import Service
@@ -64,8 +65,16 @@ async def run() -> None:
     dp["db"] = db
     dp["service"] = service
 
-    # میدلور ثبت کاربر و تزریق نقش
+    # میدلور ضدفلاد (اول) و سپس ثبت کاربر و تزریق نقش
+    dp.update.outer_middleware(ThrottleMiddleware(settings))
     dp.update.outer_middleware(ContextMiddleware(settings, db))
+
+    # هندلر سراسری خطا: هیچ خطای هندلری نباید ربات را از کار بیندازد یا اطلاعات لو دهد.
+    async def _on_error(event: Any) -> bool:
+        logger.exception("خطای پردازش‌نشده در هندلر: %s", getattr(event, "exception", event))
+        return True
+
+    dp.errors.register(_on_error)
 
     register_handlers(dp, settings, db)
 
@@ -85,7 +94,7 @@ async def run() -> None:
             await deliver_paid_order(bot, settings, db, service, row)
 
     crypto_watcher = CryptoWatcher(
-        rpc=BscRpc(service.bsc_rpc_url),
+        pool=service.make_rpc_pool(),
         db=db,
         get_confirmations=lambda: service.crypto_confirmations,
         settle=_settle_crypto,

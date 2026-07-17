@@ -20,7 +20,7 @@ from aiogram.types import (
 )
 
 from ..config import Settings
-from ..crypto import BscRpc, extract_tx_hash, verify_deposit_tx
+from ..crypto import extract_tx_hash, verify_deposit_tx
 from ..database import Database
 from ..fulfillment import deliver_paid_order, make_qr_png
 from ..keyboards import crypto_paid_keyboard
@@ -207,7 +207,7 @@ async def crypto_tx_submit(
 
     await state.clear()
     wait = await message.answer("⏳ در حال بررسی تراکنش روی شبکه‌ی BSC...")
-    rpc = BscRpc(service.bsc_rpc_url)
+    rpc = service.make_rpc_pool()
     ok, msg, received = await verify_deposit_tx(
         rpc,
         tx_hash,

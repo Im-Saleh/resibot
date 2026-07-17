@@ -35,6 +35,7 @@ def main_menu(
             InlineKeyboardButton(text="🧾 سرویس‌های من", callback_data="menu:configs"),
         ],
         second_row,
+        [InlineKeyboardButton(text="📖 راهنمای خرید و استفاده", callback_data="menu:guide")],
     ]
     if is_admin:
         rows.append([InlineKeyboardButton(text="🛠 پنل مدیریت", callback_data="menu:admin")])

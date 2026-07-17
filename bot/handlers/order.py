@@ -443,7 +443,7 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
                 cfg.admin_id,
                 "🛒 <b>سفارش جدید</b>\n"
                 f"🧩 محصول: <b>{product_txt}</b>\n"
-                f"👤 کاربر: {uname} (<code>{u.id}</code>)\n"
+                f"👤 کاربر: {escape(uname)} (<code>{u.id}</code>)\n"
                 f"📦 حجم: <b>{result.volume_gb} GB</b>\n"
                 f"💵 مبلغ: <b>{result.price:g} {cur}</b> ({pay_note})\n"
                 f"🆔 سرویس: <code>#{result.config_id}</code>",

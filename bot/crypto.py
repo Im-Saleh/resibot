@@ -35,8 +35,17 @@ USDT_BEP20_DECIMALS = 18
 # keccak256("Transfer(address,address,uint256)")
 TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 
+# متد سلکتور توابع استاندارد ERC20 (برای روش تشخیص با اسکن بلاک)
+TRANSFER_SELECTOR = "0xa9059cbb"      # transfer(address,uint256)
+TRANSFERFROM_SELECTOR = "0x23b872dd"  # transferFrom(address,address,uint256)
+
 _ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _TXHASH_RE = re.compile(r"0x[0-9a-fA-F]{64}")
+
+_UA = (
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+)
 
 # سقف بازه‌ی هر درخواست eth_getLogs. اکثر RPCهای عمومی BSC بازه را به ۲۵ تا ۵۰
 # بلاک محدود می‌کنند؛ پس محافظه‌کارانه ۲۰ می‌گذاریم تا همه‌جا کار کند.
@@ -44,6 +53,23 @@ GETLOGS_CHUNK = 20
 # سقف کل بلاک‌هایی که در یک دور رصد به عقب اسکن می‌شوند (سقف امن برای جلوگیری از
 # فشار به RPC؛ TTL معمولی فاکتور ~۶۰ دقیقه ≈ ۱۲۰۰ بلاک را پوشش می‌دهد).
 MAX_BACKFILL_BLOCKS = 2000
+# سقف بلاک‌هایی که در روش «اسکن بلاک» (fallback جهانی) در هر دور اسکن می‌شوند.
+BLOCKSCAN_WINDOW = 40
+
+# لیست پیش‌فرض RPCهای عمومی و رایگانِ BSC که eth_getLogs را پشتیبانی می‌کنند
+# (تست‌شده). استخر RPC بین این‌ها جابه‌جا می‌شود تا اگر یکی خراب/محدود شد،
+# تأیید خودکار بدون وقفه از بقیه ادامه یابد. bsc-dataseed برای receipt/block هم
+# عالی است (روش fallback اسکن بلاک).
+DEFAULT_BSC_RPCS: list[str] = [
+    "https://bsc-rpc.publicnode.com",
+    "https://bsc.publicnode.com",
+    "https://bsc-pokt.nodies.app",
+    "https://bsc.rpc.blxrbdn.com",
+    "https://1rpc.io/bnb",
+    "https://bsc-mainnet.public.blastapi.io",
+    "https://bsc-dataseed.binance.org",
+    "https://bsc-dataseed1.bnbchain.org",
+]
 
 
 def is_valid_address(addr: str) -> bool:
@@ -86,9 +112,11 @@ class BscRpc:
     async def _call(self, method: str, params: list[Any]) -> Any:
         self._id += 1
         body = {"jsonrpc": "2.0", "id": self._id, "method": method, "params": params}
+        # برخی RPCها (مثل publicnode) بدون User-Agent مرورگری، درخواست را 403 می‌کنند.
+        headers = {"Content-Type": "application/json", "User-Agent": _UA}
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(self.url, json=body)
+                resp = await client.post(self.url, json=body, headers=headers)
         except httpx.HTTPError as exc:
             raise BscRpcError(f"خطای شبکه RPC: {exc}") from exc
         if resp.status_code >= 400:
@@ -137,6 +165,9 @@ class BscRpc:
     async def get_transaction_receipt(self, tx_hash: str) -> Optional[dict[str, Any]]:
         return await self._call("eth_getTransactionReceipt", [tx_hash])
 
+    async def get_block_with_txs(self, block_number: int) -> Optional[dict[str, Any]]:
+        return await self._call("eth_getBlockByNumber", [hex(block_number), True])
+
 
 class TransferMatch:
     """یک واریز USDT شناسایی‌شده روی زنجیره."""
@@ -173,12 +204,155 @@ def parse_transfer_log(log: dict[str, Any]) -> Optional[TransferMatch]:
         return None
 
 
+def decode_usdt_tx(tx: dict[str, Any], targets: set[str]) -> Optional[TransferMatch]:
+    """یک تراکنش خام بلاک را که مستقیماً قرارداد USDT را صدا زده رمزگشایی می‌کند.
+
+    این «روش اسکن بلاک» است که روی هر RPCی کار می‌کند (eth_getBlockByNumber جهانی
+    است) و به eth_getLogs نیاز ندارد. فقط transfer/transferFrom روی قرارداد رسمی
+    USDT را می‌پذیرد → تتر فیک خود‌به‌خود رد می‌شود.
+
+    نکته: چون از ورودی تراکنش می‌خوانیم (نه رسید)، پیش از تسویه حتماً باید با
+    verify_deposit_tx (رسید) تأیید نهایی شود تا تراکنش‌های ناموفق/revert رد شوند.
+    """
+    try:
+        if normalize_address(tx.get("to", "")) != USDT_BEP20_CONTRACT:
+            return None
+        inp = (tx.get("input") or tx.get("data") or "0x").lower()
+        if len(inp) < 10:
+            return None
+        selector = inp[:10]
+        payload = inp[10:]
+        if selector == TRANSFER_SELECTOR:
+            if len(payload) < 128:
+                return None
+            to_addr = "0x" + payload[24:64]
+            amount_raw = int(payload[64:128], 16)
+        elif selector == TRANSFERFROM_SELECTOR:
+            if len(payload) < 192:
+                return None
+            to_addr = "0x" + payload[88:128]
+            amount_raw = int(payload[128:192], 16)
+        else:
+            return None
+        to_addr = to_addr.lower()
+        if to_addr not in targets:
+            return None
+        block_number = int(tx.get("blockNumber", "0x0"), 16)
+        tx_hash = (tx.get("hash") or "").lower()
+        if not tx_hash:
+            return None
+        return TransferMatch(tx_hash, to_addr, units_to_usdt(amount_raw), block_number)
+    except (ValueError, TypeError, IndexError, KeyError):
+        return None
+
+
 def amount_matches(received: float, expected: float, *, tolerance: float = 0.0005) -> bool:
     """تطبیق نزدیک-دقیق مبلغ (به‌خاطر مبالغ یکتای فاصله‌دار، دقیق کافی است).
 
     اجازه‌ی «کمی بیشتر» می‌دهد ولی «کمتر» را رد می‌کند.
     """
     return received >= (expected - tolerance)
+
+
+class RpcPool:
+    """استخری از چند RPC با failover خودکار.
+
+    هر فراخوانی از RPC فعلی شروع می‌شود؛ اگر خطا داد (خرابی/محدودیت نرخ/عدم
+    پشتیبانی)، به‌ترتیب بقیه‌ی RPCها امتحان می‌شوند. به این ترتیب اگر یکی از
+    سرویس‌ها خراب شود، تأیید خودکار بدون وقفه از بقیه ادامه می‌یابد.
+    """
+
+    def __init__(self, urls: list[str], *, timeout: float = 15.0) -> None:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for u in urls:
+            u = (u or "").strip()
+            if u and u not in seen:
+                seen.add(u)
+                ordered.append(u)
+        if not ordered:
+            ordered = list(DEFAULT_BSC_RPCS)
+        self.rpcs = [BscRpc(u, timeout=timeout) for u in ordered]
+        self._i = 0
+
+    @property
+    def urls(self) -> list[str]:
+        return [r.url for r in self.rpcs]
+
+    async def _call(self, method: str, params: list[Any]) -> Any:
+        last_exc: Optional[Exception] = None
+        n = len(self.rpcs)
+        for k in range(n):
+            idx = (self._i + k) % n
+            try:
+                res = await self.rpcs[idx]._call(method, params)
+                self._i = idx  # روی همان RPC سالم می‌مانیم
+                return res
+            except BscRpcError as exc:
+                last_exc = exc
+                continue
+        raise last_exc or BscRpcError("هیچ RPC سالمی در دسترس نبود.")
+
+    async def block_number(self) -> int:
+        result = await self._call("eth_blockNumber", [])
+        return int(result, 16) if result else 0
+
+    async def get_transaction_receipt(self, tx_hash: str) -> Optional[dict[str, Any]]:
+        return await self._call("eth_getTransactionReceipt", [tx_hash])
+
+    async def get_block_with_txs(self, block_number: int) -> Optional[dict[str, Any]]:
+        return await self._call("eth_getBlockByNumber", [hex(block_number), True])
+
+    async def get_transfer_logs(
+        self, *, to_address: str, from_block: int, to_block: int
+    ) -> list[dict[str, Any]]:
+        """رویدادهای Transfer قرارداد USDT به آدرس مقصد را در بازه برمی‌گرداند.
+
+        در تکه‌های کوچک (برای رعایت محدودیت RPCها) و با failover بین RPCها.
+        اگر همه‌ی RPCها eth_getLogs را رد کنند، خطا می‌دهد تا روش «اسکن بلاک»
+        جایگزین شود.
+        """
+        logs: list[dict[str, Any]] = []
+        start = max(0, from_block)
+        first = True
+        while start <= to_block:
+            end = min(start + GETLOGS_CHUNK - 1, to_block)
+            params = [{
+                "fromBlock": hex(start),
+                "toBlock": hex(end),
+                "address": USDT_BEP20_CONTRACT,
+                "topics": [TRANSFER_TOPIC, None, _addr_topic(to_address)],
+            }]
+            if not first:
+                await asyncio.sleep(0.1)
+            first = False
+            chunk = await self._call("eth_getLogs", params)
+            if isinstance(chunk, list):
+                logs.extend(chunk)
+            start = end + 1
+        return logs
+
+    async def scan_block_transfers(
+        self, *, targets: set[str], from_block: int, to_block: int
+    ) -> list[TransferMatch]:
+        """روش fallback جهانی: بلاک‌ها را می‌خواند و واریزهای مستقیم USDT به
+        آدرس‌های مقصد را از ورودی تراکنش‌ها استخراج می‌کند (بدون eth_getLogs)."""
+        found: list[TransferMatch] = []
+        for bn in range(max(0, from_block), to_block + 1):
+            block = await self.get_block_with_txs(bn)
+            if not block:
+                continue
+            for tx in block.get("transactions", []) or []:
+                if not isinstance(tx, dict):
+                    continue
+                m = decode_usdt_tx(tx, targets)
+                if m is not None:
+                    # blockNumber ممکن است در تراکنش نباشد؛ از خود بلاک می‌گیریم.
+                    if m.block_number == 0:
+                        m.block_number = bn
+                    found.append(m)
+            await asyncio.sleep(0.03)
+        return found
 
 
 class CryptoWatcher:
@@ -191,26 +365,28 @@ class CryptoWatcher:
     def __init__(
         self,
         *,
-        rpc: BscRpc,
+        pool: "RpcPool",
         db: Any,
         get_confirmations: Callable[[], int],
         settle: Callable[[str, str], Awaitable[None]],
         poll_interval: float = 15.0,
     ) -> None:
-        self.rpc = rpc
+        self.pool = pool
         self.db = db
         self._get_confirmations = get_confirmations
         self._settle = settle
         self._poll_interval = poll_interval
-        self._last_block = 0
         self._stopped = False
-        self._getlogs_warned = False
+        self._blockscan_notified = False
 
     def stop(self) -> None:
         self._stopped = True
 
     async def run(self) -> None:
-        logger.info("رصدگر پرداخت کریپتو (USDT BEP20) شروع شد.")
+        logger.info(
+            "رصدگر پرداخت کریپتو (USDT BEP20) شروع شد | %d RPC در استخر.",
+            len(self.pool.rpcs),
+        )
         while not self._stopped:
             try:
                 await self._tick()
@@ -225,67 +401,84 @@ class CryptoWatcher:
         self.db.expire_stale_crypto_payments()
 
         waiting = self.db.list_waiting_crypto_payments()
-        current = await self.rpc.block_number()
-        if current <= 0:
-            return
-        # اگر فاکتور در انتظاری نیست، فقط نشانگر بلاک را جلو می‌بریم.
         if not waiting:
-            self._last_block = current
+            return
+        try:
+            current = await self.pool.block_number()
+        except BscRpcError:
+            logger.warning("همه‌ی RPCها برای گرفتن شماره بلاک ناموفق بودند؛ دور بعد.")
+            return
+        if current <= 0:
             return
 
         required_conf = max(1, int(self._get_confirmations()))
-        # بازه‌ی اسکن را از قدیمی‌ترین فاکتورِ در انتظار محاسبه می‌کنیم (منهای
-        # حاشیه‌ای برای تأییدها) تا هیچ واریزی از قلم نیفتد، ولی از سقف امن هم
-        # فراتر نرویم تا به RPC فشار نیاید.
         buffer = required_conf + 8
         starts = [int(p["start_block"] or 0) for p in waiting if int(p["start_block"] or 0) > 0]
         oldest = min(starts) if starts else current
-        from_block = max(0, oldest - buffer, current - MAX_BACKFILL_BLOCKS)
 
-        # آدرس‌های مقصدِ یکتا در میان فاکتورهای در انتظار (ادمین ممکن است ولت را
-        # عوض کرده باشد؛ فاکتورهای قدیمی آدرس قبلی را دارند).
+        # آدرس‌های مقصدِ یکتا در میان فاکتورهای در انتظار.
         addresses = {
             normalize_address(p["pay_address"]) for p in waiting if p["pay_address"]
         }
+        if not addresses:
+            return
+
+        # ---------- روش ۱: eth_getLogs (اصلی، سبک) ----------
         matches: list[TransferMatch] = []
+        getlogs_ok = True
+        from_block = max(0, oldest - buffer, current - MAX_BACKFILL_BLOCKS)
         for addr in addresses:
             try:
-                raw_logs = await self.rpc.get_transfer_logs(
+                raw_logs = await self.pool.get_transfer_logs(
                     to_address=addr, from_block=from_block, to_block=current
                 )
-            except BscRpcError as exc:
-                # اکثر RPCهای عمومی eth_getLogs را محدود/غیرفعال می‌کنند. فقط
-                # یک‌بار هشدار می‌دهیم تا لاگ شلوغ نشود؛ تأیید دستی با هش همچنان کار می‌کند.
-                if not self._getlogs_warned:
-                    logger.warning(
-                        "تأیید خودکار غیرفعال است: RPC فعلی eth_getLogs را پشتیبانی نمی‌کند (%s). "
-                        "کاربران می‌توانند هش تراکنش را دستی بفرستند، یا RPC با getLogs تنظیم کنید.",
-                        exc,
-                    )
-                    self._getlogs_warned = True
-                continue
-            for lg in raw_logs:
-                m = parse_transfer_log(lg)
-                if m is not None:
-                    matches.append(m)
+                for lg in raw_logs:
+                    m = parse_transfer_log(lg)
+                    if m is not None:
+                        matches.append(m)
+            except BscRpcError:
+                getlogs_ok = False
+                break
 
-        # نشانگر بلاک را جلو می‌بریم (دفعه‌ی بعد باز هم به عقب بازبینی می‌کنیم).
-        self._last_block = current
+        # ---------- روش ۲: اسکن بلاک (fallback جهانی) ----------
+        if not getlogs_ok:
+            if not self._blockscan_notified:
+                logger.info(
+                    "eth_getLogs روی هیچ RPCی در دسترس نبود؛ روش جایگزین «اسکن بلاک» فعال شد."
+                )
+                self._blockscan_notified = True
+            scan_from = max(0, current - BLOCKSCAN_WINDOW)
+            try:
+                matches = await self.pool.scan_block_transfers(
+                    targets=addresses, from_block=scan_from, to_block=current
+                )
+            except BscRpcError:
+                logger.warning("روش اسکن بلاک هم ناموفق بود؛ دور بعد دوباره تلاش می‌کنیم.")
+                return
 
         if not matches:
             return
 
-        # نگاشت مبلغ → فاکتورهای در انتظار (برای تطبیق سریع)
         for m in matches:
             confs = current - m.block_number + 1
             if confs < required_conf:
-                continue  # هنوز به‌قدر کافی تأیید نخورده؛ دفعه‌ی بعد بررسی می‌شود
+                continue
             if self.db.tx_hash_used(m.tx_hash):
-                continue  # قبلاً استفاده شده
+                continue
             payment = self._find_payment(waiting, m)
             if payment is None:
                 continue
             order_id = payment["order_id"]
+            # تأیید نهایی و قطعی با رسید تراکنش (ضدتقلب؛ تراکنش‌های ناموفق/جعلی رد می‌شوند).
+            ok, _msg, _amt = await verify_deposit_tx(
+                self.pool, m.tx_hash,
+                to_address=payment["pay_address"],
+                min_amount=float(payment["pay_amount"]),
+                required_conf=required_conf,
+                min_block=int(payment["start_block"] or 0),
+            )
+            if not ok:
+                continue
             try:
                 await self._settle(order_id, m.tx_hash)
                 logger.info(
@@ -318,7 +511,7 @@ class CryptoWatcher:
 
 
 async def verify_deposit_tx(
-    rpc: BscRpc,
+    rpc: Any,
     tx_hash: str,
     *,
     to_address: str,
@@ -326,6 +519,8 @@ async def verify_deposit_tx(
     required_conf: int,
     min_block: int = 0,
 ) -> tuple[bool, str, float]:
+    """`rpc` می‌تواند BscRpc یا RpcPool باشد (هر دو get_transaction_receipt و
+    block_number دارند)."""
     """یک هش تراکنش را برای یک فاکتور مشخص راستی‌آزمایی می‌کند.
 
     برمی‌گرداند: (موفق، پیام، مبلغ_USDT_واریزشده_به_مقصد).
