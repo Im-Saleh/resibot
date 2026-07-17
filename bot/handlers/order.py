@@ -128,9 +128,14 @@ async def buy_v2ray(
 
 @router.callback_query(F.data == "ord_cancel")
 async def order_cancel(call: CallbackQuery, state: FSMContext) -> None:
+    from ..keyboards import back_to_menu_kb
     await state.clear()
     await call.answer("لغو شد.")
-    await call.message.edit_text("❌ سفارش لغو شد.")
+    try:
+        await call.message.edit_text("❌ سفارش لغو شد.")
+    except Exception:  # noqa: BLE001
+        pass
+    await call.message.answer("به منوی اصلی برگردید:", reply_markup=back_to_menu_kb())
 
 
 # ---------------------------------------------------------------------- #
@@ -223,9 +228,12 @@ async def _ask_city(message: Message, state: FSMContext, service: Service) -> No
     if city_list:
         await state.set_state(OrderStates.choosing_city)
         loc_label = countries.display_name(area) if _is_res2(data) else locations.prettify(st)
+        # برای رزیدنتال ۲ امکان وارد کردن نام شهر دلخواه هم هست (چون پوشش شهری
+        # IPRoyal گسترده است و ممکن است شهر موردنظر در لیست نباشد).
         await message.answer(
-            f"🏙 شهر موردنظر در {loc_label} را انتخاب کنید:",
-            reply_markup=options_keyboard("ord_city", city_list),
+            f"🏙 شهر موردنظر در {loc_label} را انتخاب کنید:\n"
+            + ("(اگر شهرتان نبود «✍️ دلخواه» را بزنید و نامش را انگلیسی بنویسید)" if _is_res2(data) else ""),
+            reply_markup=options_keyboard("ord_city", city_list, allow_custom=_is_res2(data)),
         )
     else:
         await state.update_data(city="")
@@ -236,9 +244,25 @@ async def _ask_city(message: Message, state: FSMContext, service: Service) -> No
 async def order_city(call: CallbackQuery, state: FSMContext, service: Service) -> None:
     value = call.data.split(":", 1)[1]
     await call.answer()
+    if value == "__custom__":
+        await state.set_state(OrderStates.entering_city)
+        await call.message.answer(
+            "🏙 نام شهر را به انگلیسی بفرستید (مثلاً: <code>losangeles</code> یا <code>berlin</code>):"
+        )
+        return
     city = "" if value == "__rand__" else value
     await state.update_data(city=city)
     await _ask_life(call.message, state, service)
+
+
+@router.message(OrderStates.entering_city)
+async def order_city_text(message: Message, state: FSMContext, service: Service) -> None:
+    city = normalize_code(message.text or "")
+    if not city or not validate_code(city):
+        await message.answer("⛔️ نام شهر نامعتبر است. فقط حروف انگلیسی/عدد/خط‌تیره، بدون فاصله. دوباره بفرستید:")
+        return
+    await state.update_data(city=city)
+    await _ask_life(message, state, service)
 
 
 # ---------------------------------------------------------------------- #
@@ -293,11 +317,13 @@ async def order_life_text(message: Message, state: FSMContext, service: Service)
 
 
 async def _ask_volume(message: Message, state: FSMContext, service: Service) -> None:
+    from ..keyboards import back_to_menu_kb
     await state.set_state(OrderStates.entering_volume)
     await message.answer(
         f"📦 حجم موردنظر را به گیگابایت وارد کنید:\n"
         f"• حداقل خرید: <b>{service.min_volume_gb} GB</b> (سقف ندارد)\n"
-        f"• مدت اعتبار: <b>{service.cfg.config_duration_days} روز</b>"
+        f"• مدت اعتبار: <b>{service.cfg.config_duration_days} روز</b>",
+        reply_markup=back_to_menu_kb(),
     )
 
 
@@ -431,7 +457,8 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
         return
 
     await wait.delete()
-    await call.message.answer(provision_message(result))
+    from ..keyboards import back_to_menu_kb
+    await call.message.answer(provision_message(result), reply_markup=back_to_menu_kb())
 
     if call.from_user.id != cfg.admin_id:
         u = call.from_user

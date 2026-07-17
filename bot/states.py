@@ -11,6 +11,7 @@ class OrderStates(StatesGroup):
     entering_country = State()   # ورود دستی کد کشور
     choosing_state = State()     # انتخاب استان از لیست
     choosing_city = State()      # انتخاب شهر از لیست
+    entering_city = State()      # ورود دستی نام شهر (رزیدنتال ۲)
     choosing_life = State()      # انتخاب زمان تعویض IP
     entering_life = State()      # ورود دستی زمان تعویض IP
     entering_volume = State()
@@ -76,6 +77,7 @@ class AdminStates(StatesGroup):
     set_v2ray_plan_reseller = State()
     # رفرال و تخفیف کاربران
     set_referral_percent = State()
+    set_min_topup = State()
     disc_user = State()      # آیدی کاربر برای تعیین تخفیف
     disc_percent = State()   # درصد تخفیف
     userinfo_id = State()    # آیدی کاربر برای پروفایل/مدیریت

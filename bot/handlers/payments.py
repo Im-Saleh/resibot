@@ -33,7 +33,7 @@ router = Router(name="payments")
 
 
 def _fmt_amount(x: float) -> str:
-    return f"{x:.3f}".rstrip("0").rstrip(".")
+    return f"{x:.6f}".rstrip("0").rstrip(".")
 
 
 async def _owned_waiting_payment(order_id: str, uid: int, db: Database):
@@ -54,7 +54,10 @@ async def pm_cancel(call: CallbackQuery, db: Database) -> None:
         db.set_payment_status(order_id, "cancelled")
     await call.answer("لغو شد.")
     try:
-        await call.message.edit_text("❌ پرداخت لغو شد.")
+        await call.message.answer(
+            "❌ پرداخت لغو شد.\nبرای ادامه از منوی اصلی استفاده کنید:",
+            reply_markup=back_to_menu_kb(),
+        )
     except Exception:  # noqa: BLE001
         pass
 
@@ -83,16 +86,18 @@ async def pm_crypto(call: CallbackQuery, service: Service, db: Database) -> None
     amount_txt = _fmt_amount(float(info["pay_amount"]))
     text = (
         "💠 <b>پرداخت مستقیم USDT — شبکه BEP20 (BSC)</b>\n\n"
-        "مبلغ زیر را به آدرس مقصد واریز کنید:\n\n"
-        f"💵 مبلغ: <b>{amount_txt} USDT</b>\n"
+        "لطفاً <b>دقیقاً همین مبلغ</b> را به آدرس مقصد واریز کنید (این مبلغ یکتاست و "
+        "برای شناسایی خودکار پرداخت شما لازم است):\n\n"
+        f"💵 مبلغ دقیق: <b>{amount_txt} USDT</b>\n"
         f"🌐 شبکه: <b>BEP20 (BSC)</b>\n"
         "👛 آدرس مقصد:\n"
         f"<code>{escape(info['address'])}</code>\n\n"
         f"⏳ اعتبار فاکتور: <b>{info['ttl_min']} دقیقه</b>\n\n"
-        "✅ <b>بعد از واریز، دکمه‌ی «🧾 ارسال هش تراکنش / لینک» را بزنید</b> و کد رهگیری "
-        "(TxID) یا لینک BscScan تراکنش را بفرستید تا بررسی و سرویس تحویل داده شود.\n\n"
-        "⚠️ <b>هشدار امنیتی:</b> فقط <b>USDT واقعی روی شبکه‌ی BEP20</b> بفرستید. "
-        "توکن تقلبی یا شبکه‌ی دیگر پذیرفته نمی‌شود."
+        "🤖 پرداخت شما <b>خودکار</b> و هر چند ثانیه یک‌بار بررسی می‌شود؛ به‌محض تأیید، "
+        "سرویس تحویل داده می‌شود.\n"
+        "🧾 اگر بعد از چند دقیقه خودکار تأیید نشد، کافی است <b>هش تراکنش (TxID) یا لینک BscScan</b> "
+        "را همین‌جا بفرستید (حتی بدون زدن دکمه) تا فوری با آن بررسی و تأیید شود.\n\n"
+        "⚠️ <b>امنیتی:</b> فقط <b>USDT واقعی روی شبکه‌ی BEP20</b> بفرستید؛ توکن تقلبی یا شبکه‌ی دیگر پذیرفته نمی‌شود."
     )
     # QR آدرس ولت را به‌صورت کپشن به همین پیام ضمیمه می‌کنیم (نه پیام جدا).
     kb = crypto_paid_keyboard(order_id)
@@ -179,8 +184,8 @@ async def crypto_check(call: CallbackQuery, db: Database, service: Service) -> N
         await call.answer("⛔️ این فاکتور منقضی شده است. لطفاً دوباره سفارش دهید.", show_alert=True)
         return
     await call.answer(
-        "ℹ️ برای تأیید پرداخت، بعد از واریز دکمه‌ی «🧾 ارسال هش تراکنش / لینک» را بزنید و "
-        "کد رهگیری تراکنش را بفرستید.",
+        "⏳ هنوز واریز تأییدشده‌ای دیده نشده. سیستم هر چند ثانیه یک‌بار خودکار بررسی می‌کند. "
+        "اگر عجله دارید، هش تراکنش یا لینک BscScan را بفرستید تا فوری بررسی شود.",
         show_alert=True,
     )
 
@@ -194,11 +199,15 @@ async def _verify_and_settle(bot, db: Database, service: Service, cfg: Settings,
     if db.tx_hash_used(tx_hash):
         return (False, "این هش تراکنش قبلاً برای یک سفارش استفاده شده است.")
     rpc = service.make_rpc_pool()
+    # هنگام بررسی با هش، مبلغ پایه (قیمت واقعی) ملاک است؛ پس چه کاربر مبلغ رند
+    # (مثل 1) و چه مبلغ یکتا (1.000021) را فرستاده باشد، هر دو پذیرفته می‌شود.
+    base_amount = service._payment_usd(row)
+    min_amount = base_amount if base_amount > 0 else float(row["pay_amount"])
     ok, msg, _received = await verify_deposit_tx(
         rpc,
         tx_hash,
         to_address=row["pay_address"],
-        min_amount=float(row["pay_amount"]),
+        min_amount=min_amount,
         required_conf=service.crypto_confirmations,
         min_block=int(row["start_block"] or 0),
     )

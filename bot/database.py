@@ -622,6 +622,13 @@ class Database:
         rows = self.query_all("SELECT tg_id FROM users")
         return [int(r["tg_id"]) for r in rows]
 
+    def list_all_users(self, *, limit: int = 10, offset: int = 0) -> list[sqlite3.Row]:
+        """لیست همه‌ی کاربران (جدیدترین اول) برای مرور صفحه‌به‌صفحه در پنل ادمین."""
+        return self.query_all(
+            "SELECT * FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (int(limit), int(offset)),
+        )
+
     # ------------------------------------------------------------------ #
     # partnership requests
     # ------------------------------------------------------------------ #

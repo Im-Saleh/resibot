@@ -32,6 +32,7 @@ from ..keyboards import (
     setrole_keyboard,
     toggles_menu,
     user_actions_kb,
+    users_list_keyboard,
     users_menu,
 )
 from ..service import (
@@ -39,6 +40,7 @@ from ..service import (
     S_CRYPTO_AUTOCONFIRM,
     S_CRYPTO_CONFIRMATIONS,
     S_CRYPTO_WALLET,
+    S_MIN_TOPUP,
     S_REFERRAL_PERCENT,
     S_HOST,
     S_IPROYAL_HOST,
@@ -168,6 +170,53 @@ async def userinfo_id(message: Message, state: FSMContext, db: Database, service
     await state.clear()
     tg_id = int(text)
     await message.answer(
+        _user_profile_text(db, service, tg_id),
+        reply_markup=user_actions_kb(tg_id, banned=db.is_banned(tg_id)),
+    )
+
+
+_USERS_PAGE = 10
+
+
+@router.callback_query(F.data.startswith("adm:allusers:"))
+async def adm_allusers(call: CallbackQuery, db: Database, service: Service) -> None:
+    await call.answer()
+    try:
+        page = max(0, int(call.data.split(":")[2]))
+    except (ValueError, IndexError):
+        page = 0
+    offset = page * _USERS_PAGE
+    rows = db.list_all_users(limit=_USERS_PAGE + 1, offset=offset)
+    has_next = len(rows) > _USERS_PAGE
+    rows = rows[:_USERS_PAGE]
+    total = db.count_users()
+    if not rows:
+        await call.message.answer("کاربری در این صفحه نیست.", reply_markup=back_to_panel_kb())
+        return
+    text = (
+        f"📋 <b>همه‌ی کاربران</b> (کل: {total}) — صفحه {page + 1}\n"
+        "روی هر کاربر بزنید تا پروفایل و کارهایش را ببینید:\n"
+        "👑 ادمین | 🌐 همکار رزیدنتال | 🛡 همکار V2Ray | 👤 عادی | 🚫 مسدود"
+    )
+    try:
+        await call.message.edit_text(
+            text, reply_markup=users_list_keyboard(rows, page=page, has_next=has_next)
+        )
+    except Exception:  # noqa: BLE001
+        await call.message.answer(
+            text, reply_markup=users_list_keyboard(rows, page=page, has_next=has_next)
+        )
+
+
+@router.callback_query(F.data.startswith("uopen:"))
+async def uopen(call: CallbackQuery, db: Database, service: Service) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 2 or not parts[1].isdigit():
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    tg_id = int(parts[1])
+    await call.answer()
+    await call.message.answer(
         _user_profile_text(db, service, tg_id),
         reply_markup=user_actions_kb(tg_id, banned=db.is_banned(tg_id)),
     )
@@ -529,6 +578,7 @@ async def adm_prices(call: CallbackQuery, service: Service) -> None:
         f"• V2Ray عادی: <b>{service.v2ray_price_per_gb:g} {tmn}</b>\n"
         f"• V2Ray همکار: <b>{service.v2ray_reseller_price_per_gb:g} {tmn}</b>\n"
         f"• حداقل موجودی همکار v2ray: <b>{service.reseller_min_balance:g} {tmn}</b>\n"
+        f"• حداقل شارژ کیف پول: <b>{service.min_topup:g} {tmn}</b>\n"
         f"• نرخ تتر/تومان: <b>{service.toman_per_usd:g} {tmn}</b> به ازای هر دلار\n\n"
         "برای تغییر یکی را انتخاب کنید:"
     )
@@ -808,6 +858,7 @@ _SETTING_PROMPTS = {
     "v2ray_plan_price": (AdminStates.set_v2ray_plan_price, "قیمت پلن V2Ray عادی (USDT) را بفرستید:"),
     "v2ray_plan_reseller": (AdminStates.set_v2ray_plan_reseller, "قیمت پلن V2Ray همکار (USDT) را بفرستید:"),
     "referral_percent": (AdminStates.set_referral_percent, "درصد پاداش رفرال را بفرستید (عدد بین ۰ تا ۱۰۰):"),
+    "min_topup": (AdminStates.set_min_topup, "حداقل مبلغ شارژ کیف پول را بفرستید (مثلاً 100000):"),
 }
 
 
@@ -991,6 +1042,11 @@ async def s_v2ray_reseller_price(message: Message, state: FSMContext, service: S
 @router.message(AdminStates.set_reseller_min_balance)
 async def s_reseller_min_balance(message: Message, state: FSMContext, service: Service) -> None:
     await _save_float(message, state, service, S_RESELLER_MIN_BALANCE, "حداقل موجودی همکار v2ray")
+
+
+@router.message(AdminStates.set_min_topup)
+async def s_min_topup(message: Message, state: FSMContext, service: Service) -> None:
+    await _save_float(message, state, service, S_MIN_TOPUP, "حداقل شارژ کیف پول")
 
 
 @router.message(AdminStates.set_toman_rate)

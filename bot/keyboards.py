@@ -202,6 +202,7 @@ def country_keyboard(prefix: str, popular: list[tuple[str, str]] | None = None) 
         InlineKeyboardButton(text="✍️ کد دلخواه", callback_data=f"{prefix}:__custom__"),
         InlineKeyboardButton(text="🎲 تصادفی", callback_data=f"{prefix}:__skip__"),
     ])
+    rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -220,6 +221,7 @@ def country_results_keyboard(prefix: str, results: list[tuple[str, str]]) -> Inl
         InlineKeyboardButton(text="🔍 جستجوی دوباره", callback_data=f"{prefix}:__search__"),
         InlineKeyboardButton(text="🎲 تصادفی", callback_data=f"{prefix}:__skip__"),
     ])
+    rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -232,10 +234,13 @@ def options_keyboard(
     *,
     columns: int = 2,
     back_cb: str | None = None,
+    allow_custom: bool = False,
+    home: bool = True,
 ) -> InlineKeyboardMarkup:
     """کیبورد انتخاب از یک لیست. هر دکمه callback = f"{prefix}:{item}".
 
-    گزینه‌ی «تصادفی» با مقدار __rand__ و دکمه‌ی بازگشت اختیاری اضافه می‌شود.
+    گزینه‌ی «تصادفی» با مقدار __rand__، گزینه‌ی «دلخواه» (اختیاری) با __custom__،
+    دکمه‌ی بازگشت اختیاری و دکمه‌ی منوی اصلی اضافه می‌شود.
     """
     rows: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -246,9 +251,14 @@ def options_keyboard(
             row = []
     if row:
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="🎲 تصادفی", callback_data=f"{prefix}:__rand__")])
+    last = [InlineKeyboardButton(text="🎲 تصادفی", callback_data=f"{prefix}:__rand__")]
+    if allow_custom:
+        last.append(InlineKeyboardButton(text="✍️ دلخواه", callback_data=f"{prefix}:__custom__"))
+    rows.append(last)
     if back_cb:
         rows.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data=back_cb)])
+    if home:
+        rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -293,6 +303,7 @@ def life_keyboard(prefix: str, presets: list[int] | None = None) -> InlineKeyboa
         rows.append(row)
     rows.append([InlineKeyboardButton(text="🔒 بدون تعویض خودکار", callback_data=f"{prefix}:0")])
     rows.append([InlineKeyboardButton(text="✍️ مقدار دلخواه (دقیقه)", callback_data=f"{prefix}:__custom__")])
+    rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -309,6 +320,7 @@ def configs_list_keyboard(rows: list, *, show_owner: bool = False) -> InlineKeyb
         if show_owner:
             label += f" • 👤{r['owner_tg_id']}"
         kb.append([InlineKeyboardButton(text=label, callback_data=f"cfg_open:{r['id']}")])
+    kb.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -382,6 +394,7 @@ def config_actions(config_id: int, *, is_admin: bool = False, product: str = "re
     if is_admin:
         rows.append([InlineKeyboardButton(text="🗑 حذف کانفیگ", callback_data=f"cfg_del:{config_id}")])
     rows.append([InlineKeyboardButton(text="⬅️ بازگشت به لیست", callback_data="cfg_back")])
+    rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -529,6 +542,7 @@ def prices_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛡 V2Ray - عادی", callback_data="set:v2ray_price")],
             [InlineKeyboardButton(text="🛡 V2Ray - همکار", callback_data="set:v2ray_reseller_price")],
             [InlineKeyboardButton(text="💰 حداقل موجودی همکار v2ray", callback_data="set:reseller_min_balance")],
+            [InlineKeyboardButton(text="💵 حداقل شارژ کیف پول", callback_data="set:min_topup")],
             [InlineKeyboardButton(text="💱 نرخ تتر/تومان", callback_data="set:toman_rate")],
             _panel_row(),
         ]
@@ -569,6 +583,7 @@ def custbot_menu() -> InlineKeyboardMarkup:
 def users_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(text="📋 لیست همه‌ی کاربران", callback_data="adm:allusers:0")],
             [InlineKeyboardButton(text="🌐 لیست همکاران رزیدنتال", callback_data="usr:list_res")],
             [InlineKeyboardButton(text="🛡 لیست همکاران v2ray", callback_data="usr:list_v2")],
             [InlineKeyboardButton(text="🔎 پروفایل/مدیریت کاربر", callback_data="adm:userinfo")],
@@ -576,6 +591,30 @@ def users_menu() -> InlineKeyboardMarkup:
             _panel_row(),
         ]
     )
+
+
+def users_list_keyboard(rows: list, *, page: int, has_next: bool, currency: str = "") -> InlineKeyboardMarkup:
+    """لیست کاربران با دکمه‌ی هر کاربر (باز کردن پروفایل) + ناوبری صفحه."""
+    kb: list[list[InlineKeyboardButton]] = []
+    for r in rows:
+        role = r["role"] if "role" in r.keys() else "user"
+        role_icon = {"admin": "👑", "residential_reseller": "🌐", "v2ray_reseller": "🛡"}.get(role, "👤")
+        banned = ""
+        try:
+            banned = "🚫" if int(r["is_banned"] or 0) else ""
+        except (KeyError, IndexError, TypeError, ValueError):
+            banned = ""
+        label = f"{banned}{role_icon} {r['tg_id']} • {float(r['balance']):g}"
+        kb.append([InlineKeyboardButton(text=label, callback_data=f"uopen:{r['tg_id']}")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"adm:allusers:{page-1}"))
+    if has_next:
+        nav.append(InlineKeyboardButton(text="بعدی ➡️", callback_data=f"adm:allusers:{page+1}"))
+    if nav:
+        kb.append(nav)
+    kb.append(_panel_row())
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def setrole_keyboard(tg_id: int) -> InlineKeyboardMarkup:

@@ -102,6 +102,7 @@ async def run() -> None:
             db=db,
             get_confirmations=lambda: service.crypto_confirmations,
             settle=_settle_crypto,
+            poll_interval=12.0,
         )
         watcher_task = asyncio.create_task(crypto_watcher.run())
     else:

@@ -94,6 +94,9 @@ S_CRYPTO_AUTOCONFIRM = "crypto_autoconfirm"
 # رفرال
 S_REFERRAL_PERCENT = "referral_percent"
 
+# حداقل مبلغ شارژ کیف پول
+S_MIN_TOPUP = "min_topup"
+
 # پلن V2Ray (یک‌ماهه نامحدود)
 S_V2RAY_INBOUND_ID = "v2ray_inbound_id"
 S_V2RAY_PLAN_PRICE = "v2ray_plan_price"
@@ -172,6 +175,7 @@ class Service:
         self.db.seed_setting(S_CRYPTO_CONFIRMATIONS, str(self.cfg.crypto_confirmations))
         self.db.seed_setting(S_CRYPTO_AUTOCONFIRM, "1" if self.cfg.crypto_autoconfirm else "0")
         self.db.seed_setting(S_REFERRAL_PERCENT, str(self.cfg.referral_percent))
+        self.db.seed_setting(S_MIN_TOPUP, str(self.cfg.min_topup))
         # پلن V2Ray
         self.db.seed_setting(S_V2RAY_INBOUND_ID, str(self.cfg.v2ray_inbound_id))
         self.db.seed_setting(S_V2RAY_PLAN_PRICE, str(self.cfg.v2ray_plan_price))
@@ -364,6 +368,11 @@ class Service:
 
     def v2ray_plan_price_for_user(self, tg_id: int, role: str) -> float:
         return self.apply_discount(self.v2ray_plan_price_for(role), tg_id, PRODUCT_V2RAY)
+
+    # --- حداقل شارژ ---
+    @property
+    def min_topup(self) -> float:
+        return self._fsetting(S_MIN_TOPUP, self.cfg.min_topup)
 
     # --- پلن V2Ray ---
     @property
@@ -1131,14 +1140,20 @@ class Service:
         return f"{self.cfg.brand_name}-{kind}-{int(tg_id)}-{secrets.token_hex(5)}"
 
     def _unique_pay_amount(self, usd: float) -> float:
-        """یک مبلغ USDT یکتا برای تطبیق واریز می‌سازد (پایه + offset کوچک بی‌تداخل)."""
+        """یک مبلغ USDT «یکتا و غیررند» می‌سازد؛ مثل 1.000021 برای پایه‌ی 1 دلار.
+
+        offset در رقم‌های میکرو (۶ رقم اعشار) است تا مبلغ هیچ‌وقت رند نباشد و بین
+        فاکتورهای در انتظار تکراری هم نشود (برای تطبیق دقیق در تأیید خودکار).
+        """
         base = round(float(usd), 2)
         used = self.db.waiting_crypto_pay_amounts()
-        for k in range(1, 900):
-            cand = round(base + k * 0.001, 3)
+        for _ in range(400):
+            k = random.randint(11, 999)  # 0.000011 .. 0.000999
+            cand = round(base + k * 0.000001, 6)
             if round(cand, 6) not in used:
                 return cand
-        return round(base + random.randint(1, 999) / 1000.0, 3)
+        # فالبک بعیدالوقوع: offset بزرگ‌تر
+        return round(base + random.randint(1000, 999999) * 0.000001, 6)
 
     def create_order_payment(
         self, tg_id: int, *, product: str, usd: float, meta_extra: dict[str, Any],
@@ -1200,8 +1215,8 @@ class Service:
         usd = self._payment_usd(row)
         if usd <= 0:
             raise ValueError("مبلغ نامعتبر است.")
-        # مبلغ دقیقِ همان قیمت (بدون offset یکتا)؛ کاربر همین مبلغ را واریز می‌کند.
-        pay_amount = round(usd, 2)
+        # مبلغ یکتا و غیررند (مثل 1.000021) برای تطبیق دقیق در تأیید خودکار.
+        pay_amount = self._unique_pay_amount(usd)
         # بلاک شروع را می‌گیریم تا فقط واریزهای بعد از این لحظه معتبر باشند.
         start_block = 0
         try:
