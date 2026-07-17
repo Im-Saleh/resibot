@@ -929,6 +929,20 @@ class Service:
             f"• مجموع فروش رزیدنتال: <b>{res_amount:g} {self.residential_currency}</b>",
             f"• مجموع فروش V2Ray: <b>{v2_amount:g} {self.currency}</b>",
         ]
+        # آمار پرداخت‌ها و کاربران مسدود
+        try:
+            pt = self.db.payment_totals()
+            lines.append(f"• تراکنش‌ها: <b>{pt['paid']}</b> پرداخت‌شده از <b>{pt['total']}</b>")
+            for c in pt["by_currency"]:
+                lines.append(f"   └ {c['sum']:g} {c['currency']} ({c['count']} پرداخت)")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            banned = self.db.count_banned()
+            if banned:
+                lines.append(f"• کاربران مسدود: <b>{banned}</b>")
+        except Exception:  # noqa: BLE001
+            pass
         # تجمیع به ازای هر مالک
         per_owner: dict[int, dict[str, float]] = {}
         for c in configs:

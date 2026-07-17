@@ -78,6 +78,7 @@ class AdminStates(StatesGroup):
     set_referral_percent = State()
     disc_user = State()      # آیدی کاربر برای تعیین تخفیف
     disc_percent = State()   # درصد تخفیف
+    userinfo_id = State()    # آیدی کاربر برای پروفایل/مدیریت
     setrole_id = State()
     credit_id = State()
     credit_amount = State()

@@ -67,6 +67,19 @@ class ContextMiddleware(BaseMiddleware):
         self.cfg = cfg
         self.db = db
 
+    @staticmethod
+    async def _reply(event: TelegramObject, text: str) -> None:
+        """پاسخ کوتاه به کاربر (چه پیام باشد چه کلیک دکمه)."""
+        msg = getattr(event, "message", None)
+        cb = getattr(event, "callback_query", None)
+        try:
+            if cb is not None:
+                await cb.answer(text, show_alert=True)
+            elif msg is not None:
+                await msg.answer(text)
+        except Exception:  # noqa: BLE001
+            pass
+
     async def __call__(
         self,
         handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
@@ -79,6 +92,20 @@ class ContextMiddleware(BaseMiddleware):
             name = (user.full_name or user.username or "")[:64]
             self.db.ensure_user(user.id, name)
             is_admin = user.id == self.cfg.admin_id
+
+            # کاربران مسدودشده هیچ دسترسی‌ای ندارند (ادمین مستثناست).
+            if not is_admin and self.db.is_banned(user.id):
+                await self._reply(event, "⛔️ دسترسی شما به ربات مسدود شده است.")
+                return None
+
+            # حالت تعمیر: فقط ادمین اجازه دارد.
+            if not is_admin and self.db.get_setting("maintenance_mode", "0") == "1":
+                await self._reply(
+                    event,
+                    "🛠 ربات موقتاً در حال تعمیر و به‌روزرسانی است. لطفاً کمی بعد دوباره امتحان کنید.",
+                )
+                return None
+
             role = ROLE_ADMIN if is_admin else self.db.get_role(user.id)
             data["role"] = role
             data["is_admin"] = is_admin

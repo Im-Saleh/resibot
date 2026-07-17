@@ -40,8 +40,13 @@ def make_qr_png(data: str) -> bytes | None:
         return None
 
 
-def _v2ray_message(info: dict[str, Any]) -> str:
-    lines = [
+# سقف کپشن عکس در تلگرام
+_CAPTION_LIMIT = 1024
+
+
+def _v2ray_caption(info: dict[str, Any]) -> str:
+    """بخش اصلی و کوتاه پیام (تضمیناً زیر سقف کپشن)."""
+    return "\n".join([
         "✅ <b>سرویس V2Ray شما ساخته شد</b>",
         "",
         "📦 حجم: <b>نامحدود</b> ♾",
@@ -51,33 +56,46 @@ def _v2ray_message(info: dict[str, Any]) -> str:
         "",
         "🔗 <b>لینک ساب (Subscription):</b>",
         f"<code>{escape(info.get('sub_link', ''))}</code>",
-    ]
+    ])
+
+
+def _v2ray_links_text(info: dict[str, Any]) -> str:
     links = info.get("vless_links") or []
-    if links:
-        lines.append("")
-        lines.append("📋 <b>لینک کانفیگ:</b>")
-        for vl in links:
-            lines.append(f"<code>{escape(str(vl))}</code>")
-    lines.append("")
-    lines.append("📷 QR‌کد ساب در پیام بعدی ارسال می‌شود.")
+    if not links:
+        return ""
+    lines = ["📋 <b>لینک کانفیگ:</b>"]
+    for vl in links:
+        lines.append(f"<code>{escape(str(vl))}</code>")
     return "\n".join(lines)
 
 
 async def _send_v2ray(bot: Any, tg_id: int, info: dict[str, Any]) -> None:
-    await bot.send_message(tg_id, _v2ray_message(info))
+    """پیام تحویل V2Ray را همراه با QR (به‌صورت کپشن همان عکس) می‌فرستد.
+
+    اگر متن کامل از سقف کپشن بیشتر شود، لینک‌های کانفیگ در یک پیام بعدی می‌آیند؛
+    ولی QR همیشه ضمیمه‌ی پیام اصلی (اطلاعات + لینک ساب) است.
+    """
+    caption = _v2ray_caption(info)
+    links_text = _v2ray_links_text(info)
+    full = caption + (("\n\n" + links_text) if links_text else "")
     sub_link = info.get("sub_link", "")
     png = make_qr_png(sub_link) if sub_link else None
-    if png:
-        try:
-            from aiogram.types import BufferedInputFile
 
-            await bot.send_photo(
-                tg_id,
-                BufferedInputFile(png, filename="sub-qr.png"),
-                caption="📷 QR‌کد لینک ساب — در کلاینت اسکن کنید.",
-            )
+    if png:
+        from aiogram.types import BufferedInputFile
+        photo = BufferedInputFile(png, filename="sub-qr.png")
+        try:
+            if len(full) <= _CAPTION_LIMIT:
+                await bot.send_photo(tg_id, photo, caption=full)
+            else:
+                await bot.send_photo(tg_id, photo, caption=caption)
+                if links_text:
+                    await bot.send_message(tg_id, links_text)
+            return
         except Exception:  # noqa: BLE001
-            logger.warning("ارسال QR به کاربر %s ناموفق بود", tg_id)
+            logger.warning("ارسال عکس QR به کاربر %s ناموفق بود؛ متن ساده ارسال می‌شود", tg_id)
+    # فالبک بدون QR
+    await bot.send_message(tg_id, full)
 
 
 async def send_v2ray_delivery(bot: Any, tg_id: int, info: dict[str, Any]) -> None:

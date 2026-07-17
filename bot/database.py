@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -64,6 +64,8 @@ class Database:
                 self._migrate_v5()
             if current < 6:
                 self._migrate_v6()
+            if current < 7:
+                self._migrate_v7()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -257,6 +259,13 @@ class Database:
         )
         c.execute("CREATE INDEX IF NOT EXISTS idx_users_ref ON users(referred_by)")
         c.commit()
+
+    def _migrate_v7(self) -> None:
+        """افزودن ستون is_banned برای مسدودسازی کاربر (additive، بدون حذف داده)."""
+        if not self._column_exists("users", "is_banned"):
+            self._conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
+        self._conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
+        self._conn.commit()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -464,6 +473,66 @@ class Database:
         return self.query_all(
             "SELECT * FROM users WHERE role = ? ORDER BY updated_at DESC", (role,)
         )
+
+    # ------------------------------------------------------------------ #
+    # مسدودسازی کاربر
+    # ------------------------------------------------------------------ #
+    def set_banned(self, tg_id: int, banned: bool) -> None:
+        self.ensure_user(tg_id)
+        self.execute(
+            "UPDATE users SET is_banned = ?, updated_at = ? WHERE tg_id = ?",
+            (1 if banned else 0, int(time.time()), int(tg_id)),
+        )
+
+    def is_banned(self, tg_id: int) -> bool:
+        row = self.get_user(tg_id)
+        try:
+            return bool(row and int(row["is_banned"]))
+        except (KeyError, IndexError, TypeError, ValueError):
+            return False
+
+    def count_banned(self) -> int:
+        row = self.query_one("SELECT COUNT(*) AS c FROM users WHERE is_banned = 1")
+        return int(row["c"]) if row else 0
+
+    def count_configs(self, owner_tg_id: int) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS c FROM configs WHERE owner_tg_id = ? AND active = 1",
+            (int(owner_tg_id),),
+        )
+        return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------ #
+    # تراکنش‌ها (گزارش)
+    # ------------------------------------------------------------------ #
+    def list_recent_payments(self, limit: int = 20) -> list[sqlite3.Row]:
+        return self.query_all(
+            "SELECT * FROM payments ORDER BY created_at DESC LIMIT ?", (int(limit),)
+        )
+
+    def latest_waiting_crypto_payment(self, tg_id: int) -> Optional[sqlite3.Row]:
+        return self.query_one(
+            "SELECT * FROM payments WHERE tg_id = ? AND method = 'crypto' AND credited = 0 "
+            "AND status = 'waiting' ORDER BY created_at DESC LIMIT 1",
+            (int(tg_id),),
+        )
+
+    def payment_totals(self) -> dict[str, Any]:
+        """آمار پرداخت‌ها: تعداد کل، تعداد پرداخت‌شده، و مجموع مبالغ credit‌شده به تفکیک ارز."""
+        total = self.query_one("SELECT COUNT(*) AS c FROM payments")
+        paid = self.query_one("SELECT COUNT(*) AS c FROM payments WHERE credited = 1")
+        by_cur = self.query_all(
+            "SELECT currency, COUNT(*) AS c, SUM(amount) AS s FROM payments "
+            "WHERE credited = 1 GROUP BY currency"
+        )
+        return {
+            "total": int(total["c"]) if total else 0,
+            "paid": int(paid["c"]) if paid else 0,
+            "by_currency": [
+                {"currency": r["currency"], "count": int(r["c"]), "sum": float(r["s"] or 0)}
+                for r in by_cur
+            ],
+        }
 
     # ------------------------------------------------------------------ #
     # رفرال

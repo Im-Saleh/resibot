@@ -54,14 +54,25 @@ def discount_product_keyboard(tg_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌐 رزیدنتال", callback_data=f"disc:{tg_id}:residential")],
             [InlineKeyboardButton(text="🌍 رزیدنتال ۲", callback_data=f"disc:{tg_id}:residential2")],
             [InlineKeyboardButton(text="🛡 V2Ray", callback_data=f"disc:{tg_id}:v2ray")],
+            _panel_row(),
         ]
     )
 
 
+def _home_row() -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home")]
+
+
+def _panel_row() -> list[InlineKeyboardButton]:
+    return [InlineKeyboardButton(text="🔙 بازگشت به پنل", callback_data="menu:admin")]
+
+
 def back_to_menu_kb() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home")]]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[_home_row()])
+
+
+def back_to_panel_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[_panel_row()])
 
 
 # ---------------------------------------------------------------------- #
@@ -111,6 +122,7 @@ def products_menu(
         rows.append([InlineKeyboardButton(text="🛡 کانفیگ V2Ray (عادی)", callback_data="buy:v2ray")])
     if not rows:
         rows.append([InlineKeyboardButton(text="—", callback_data="noop")])
+    rows.append(_home_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -121,13 +133,15 @@ def wallet_menu(*, topup_enabled: bool = True) -> InlineKeyboardMarkup:
     rows = []
     if topup_enabled:
         rows.append([InlineKeyboardButton(text="💳 شارژ کیف پول", callback_data="wallet:topup")])
-    return InlineKeyboardMarkup(inline_keyboard=rows or [[InlineKeyboardButton(text="—", callback_data="noop")]])
+    rows.append(_home_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def partnership_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🛡 درخواست همکاری V2Ray", callback_data="partner:v2ray")],
+            _home_row(),
         ]
     )
 
@@ -389,24 +403,63 @@ def confirm_delete(config_id: int) -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------- #
 #  پنل مدیریت
 # ---------------------------------------------------------------------- #
-def admin_panel_menu(pending_count: int = 0) -> InlineKeyboardMarkup:
+def admin_panel_menu(pending_count: int = 0, *, maintenance_on: bool = False) -> InlineKeyboardMarkup:
     pending_label = "🤝 درخواست‌های همکاری"
     if pending_count:
         pending_label += f" ({pending_count})"
+    maint_label = ("🟢 حالت تعمیر: خاموش" if not maintenance_on else "🔧 حالت تعمیر: روشن")
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="📊 گزارش", callback_data="adm:report")],
+            [InlineKeyboardButton(text="📊 گزارش و آمار", callback_data="adm:report")],
             [InlineKeyboardButton(text="🧾 همه‌ی سرویس‌ها", callback_data="adm:configs")],
+            [
+                InlineKeyboardButton(text="🔎 پروفایل/مدیریت کاربر", callback_data="adm:userinfo"),
+                InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:payments"),
+            ],
             [InlineKeyboardButton(text=pending_label, callback_data="adm:requests")],
             [InlineKeyboardButton(text="👤 مدیریت کاربران/نقش‌ها", callback_data="adm:users")],
             [InlineKeyboardButton(text="💳 شارژ دستی کیف پول", callback_data="adm:credit")],
             [InlineKeyboardButton(text="📣 پیام همگانی", callback_data="adm:broadcast")],
-            [InlineKeyboardButton(text="💵 قیمت‌ها", callback_data="adm:prices")],
-            [InlineKeyboardButton(text="💳 روش‌های پرداخت", callback_data="adm:pay")],
+            [
+                InlineKeyboardButton(text="💵 قیمت‌ها", callback_data="adm:prices"),
+                InlineKeyboardButton(text="💳 روش‌های پرداخت", callback_data="adm:pay"),
+            ],
             [InlineKeyboardButton(text="🎁 رفرال و تخفیف کاربران", callback_data="adm:refdisc")],
-            [InlineKeyboardButton(text="⚙️ تنظیمات سرور", callback_data="adm:settings")],
-            [InlineKeyboardButton(text="🔀 نمایش/مخفی‌سازی بخش‌ها", callback_data="adm:toggles")],
-            [InlineKeyboardButton(text="🤖 ربات کمکی مشتری", callback_data="adm:custbot")],
+            [
+                InlineKeyboardButton(text="⚙️ تنظیمات سرور", callback_data="adm:settings"),
+                InlineKeyboardButton(text="🔀 نمایش بخش‌ها", callback_data="adm:toggles"),
+            ],
+            [
+                InlineKeyboardButton(text="📡 وضعیت سرویس‌ها", callback_data="menu:status"),
+                InlineKeyboardButton(text="🤖 ربات کمکی", callback_data="adm:custbot"),
+            ],
+            [
+                InlineKeyboardButton(text="💾 پشتیبان دیتابیس", callback_data="adm:backup"),
+                InlineKeyboardButton(text=maint_label, callback_data="adm:maint"),
+            ],
+            _home_row(),
+        ]
+    )
+
+
+def user_actions_kb(tg_id: int, *, banned: bool) -> InlineKeyboardMarkup:
+    """کیبورد اقدامات روی یک کاربر مشخص (پروفایل/مدیریت کاربر)."""
+    ban_btn = (
+        InlineKeyboardButton(text="✅ رفع مسدودی", callback_data=f"uinfo:unban:{tg_id}")
+        if banned else
+        InlineKeyboardButton(text="🚫 مسدود کردن", callback_data=f"uinfo:ban:{tg_id}")
+    )
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="💳 تغییر موجودی", callback_data=f"uinfo:credit:{tg_id}"),
+                InlineKeyboardButton(text="✏️ تغییر نقش", callback_data=f"uinfo:role:{tg_id}"),
+            ],
+            [
+                ban_btn,
+                InlineKeyboardButton(text="🏷 تخفیف", callback_data=f"disc:{tg_id}:all"),
+            ],
+            _panel_row(),
         ]
     )
 
@@ -430,6 +483,7 @@ def payments_admin_menu(*, crypto_on: bool, nowpayments_on: bool) -> InlineKeybo
             [InlineKeyboardButton(text="🛡 شناسه اینباند V2Ray", callback_data="set:v2ray_inbound")],
             [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (عادی)", callback_data="set:v2ray_plan_price")],
             [InlineKeyboardButton(text="🛡 قیمت پلن V2Ray (همکار)", callback_data="set:v2ray_plan_reseller")],
+            _panel_row(),
         ]
     )
 
@@ -443,6 +497,7 @@ def referral_discounts_menu(*, autoconfirm_on: bool) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🏷 تعیین تخفیف برای کاربر", callback_data="disc:add")],
             [InlineKeyboardButton(text="📋 لیست تخفیف‌ها", callback_data="disc:list")],
             [InlineKeyboardButton(text=f"{mark} تأیید خودکار کریپتو", callback_data="paytgl:autoconfirm")],
+            _panel_row(),
         ]
     )
 
@@ -459,6 +514,7 @@ def settings_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — پورت", callback_data="set:iproyal_port")],
             [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — یوزرنیم", callback_data="set:iproyal_username")],
             [InlineKeyboardButton(text="🌍 رزیدنتال ۲ — پسورد", callback_data="set:iproyal_password")],
+            _panel_row(),
         ]
     )
 
@@ -474,6 +530,7 @@ def prices_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛡 V2Ray - همکار", callback_data="set:v2ray_reseller_price")],
             [InlineKeyboardButton(text="💰 حداقل موجودی همکار v2ray", callback_data="set:reseller_min_balance")],
             [InlineKeyboardButton(text="💱 نرخ تتر/تومان", callback_data="set:toman_rate")],
+            _panel_row(),
         ]
     )
 
@@ -495,6 +552,7 @@ def toggles_menu(
             [InlineKeyboardButton(text=f"{mark(residential)} رزیدنتال", callback_data="tgl:residential")],
             [InlineKeyboardButton(text=f"{mark(residential2)} رزیدنتال ۲", callback_data="tgl:residential2")],
             [InlineKeyboardButton(text=f"{mark(v2ray)} V2Ray", callback_data="tgl:v2ray")],
+            _panel_row(),
         ]
     )
 
@@ -503,6 +561,7 @@ def custbot_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="ℹ️ راهنمای راه‌اندازی", callback_data="custbot:help")],
+            _panel_row(),
         ]
     )
 
@@ -512,7 +571,9 @@ def users_menu() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="🌐 لیست همکاران رزیدنتال", callback_data="usr:list_res")],
             [InlineKeyboardButton(text="🛡 لیست همکاران v2ray", callback_data="usr:list_v2")],
+            [InlineKeyboardButton(text="🔎 پروفایل/مدیریت کاربر", callback_data="adm:userinfo")],
             [InlineKeyboardButton(text="✏️ تعیین نقش با آیدی", callback_data="usr:setrole")],
+            _panel_row(),
         ]
     )
 
@@ -523,5 +584,6 @@ def setrole_keyboard(tg_id: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌐 همکار رزیدنتال", callback_data=f"role:{tg_id}:residential_reseller")],
             [InlineKeyboardButton(text="🛡 همکار v2ray", callback_data=f"role:{tg_id}:v2ray_reseller")],
             [InlineKeyboardButton(text="👤 کاربر عادی", callback_data=f"role:{tg_id}:user")],
+            _panel_row(),
         ]
     )
