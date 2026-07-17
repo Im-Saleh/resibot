@@ -10,6 +10,7 @@ import logging
 from html import escape
 
 from aiogram import F, Router
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     BufferedInputFile,
@@ -23,7 +24,7 @@ from ..config import Settings
 from ..crypto import extract_tx_hash, verify_deposit_tx
 from ..database import Database
 from ..fulfillment import deliver_paid_order, make_qr_png
-from ..keyboards import crypto_paid_keyboard
+from ..keyboards import back_to_menu_kb, crypto_paid_keyboard
 from ..service import Service
 from ..states import CryptoPayStates
 
@@ -93,16 +94,20 @@ async def pm_crypto(call: CallbackQuery, service: Service, db: Database) -> None
         "⚠️ <b>هشدار امنیتی:</b> فقط <b>USDT واقعی روی شبکه‌ی BEP20</b> بفرستید. "
         "توکن تقلبی یا شبکه‌ی دیگر پذیرفته نمی‌شود."
     )
-    await call.message.answer(text, reply_markup=crypto_paid_keyboard(order_id))
+    # QR آدرس ولت را به‌صورت کپشن به همین پیام ضمیمه می‌کنیم (نه پیام جدا).
+    kb = crypto_paid_keyboard(order_id)
     png = make_qr_png(info["address"])
     if png:
         try:
             await call.message.answer_photo(
                 BufferedInputFile(png, filename="wallet-qr.png"),
-                caption=f"📷 QR آدرس ولت — مبلغ دقیق: {amount_txt} USDT",
+                caption=text,
+                reply_markup=kb,
             )
+            return
         except Exception:  # noqa: BLE001
-            pass
+            logger.warning("ارسال عکس QR پرداخت ناموفق بود؛ متن ساده ارسال می‌شود")
+    await call.message.answer(text, reply_markup=kb)
 
 
 @router.callback_query(F.data.startswith("pm:now:"))
@@ -180,12 +185,37 @@ async def crypto_check(call: CallbackQuery, db: Database, service: Service) -> N
     )
 
 
+async def _verify_and_settle(bot, db: Database, service: Service, cfg: Settings, row, tx_hash: str) -> tuple[bool, str]:
+    """راستی‌آزمایی هش تراکنش برای یک فاکتور و در صورت تأیید، تسویه و تحویل.
+
+    برمی‌گرداند (موفق، پیام). ضدجعل: قرارداد رسمی USDT، آدرس مقصد، مبلغ، تأیید،
+    یکتایی هش، و بلاک بعد از ساخت فاکتور.
+    """
+    if db.tx_hash_used(tx_hash):
+        return (False, "این هش تراکنش قبلاً برای یک سفارش استفاده شده است.")
+    rpc = service.make_rpc_pool()
+    ok, msg, _received = await verify_deposit_tx(
+        rpc,
+        tx_hash,
+        to_address=row["pay_address"],
+        min_amount=float(row["pay_amount"]),
+        required_conf=service.crypto_confirmations,
+        min_block=int(row["start_block"] or 0),
+    )
+    if not ok:
+        return (False, msg)
+    credited = service.settle_crypto_payment(row["order_id"], tx_hash)
+    if credited is None:
+        return (False, "این پرداخت قبلاً پردازش شده یا این هش برای سفارش دیگری ثبت شده است.")
+    await deliver_paid_order(bot, cfg, db, service, credited)
+    return (True, "ok")
+
+
 @router.message(CryptoPayStates.entering_tx)
 async def crypto_tx_submit(
     message: Message, state: FSMContext, db: Database, service: Service, cfg: Settings
 ) -> None:
-    data = await state.get_data()
-    order_id = str(data.get("order_id", ""))
+    order_id = str((await state.get_data()).get("order_id", ""))
     tx_hash = extract_tx_hash(message.text or "")
     if not tx_hash:
         await message.answer("⛔️ هش تراکنش معتبر پیدا نشد. یک TxID یا لینک BscScan بفرستید:")
@@ -199,32 +229,39 @@ async def crypto_tx_submit(
         await state.clear()
         await message.answer("✅ این فاکتور قبلاً تأیید و تحویل شده است.")
         return
-    if db.tx_hash_used(tx_hash):
-        await message.answer("⛔️ این هش تراکنش قبلاً برای یک سفارش استفاده شده است.")
-        return
-
     await state.clear()
     wait = await message.answer("⏳ در حال بررسی تراکنش روی شبکه‌ی BSC...")
-    rpc = service.make_rpc_pool()
-    ok, msg, received = await verify_deposit_tx(
-        rpc,
-        tx_hash,
-        to_address=row["pay_address"],
-        min_amount=float(row["pay_amount"]),
-        required_conf=service.crypto_confirmations,
-        min_block=int(row["start_block"] or 0),
-    )
-    if not ok:
+    ok, msg = await _verify_and_settle(message.bot, db, service, cfg, row, tx_hash)
+    if ok:
+        await wait.edit_text("✅ پرداخت تأیید شد! سرویس در حال تحویل است...")
+    else:
         await wait.edit_text(
             f"⛔️ تأیید نشد:\n{escape(msg)}\n\n"
-            "پس از رفع مشکل، دوباره از دکمه‌ی «🧾 ارسال هش تراکنش» اقدام کنید."
+            "پس از رفع مشکل، دوباره هش/لینک تراکنش را بفرستید."
+        )
+
+
+# ثبت مستقیم: کاربر بدون کلیک روی دکمه، هش یا لینک BscScan را می‌فرستد و
+# خودکار برای آخرین فاکتور بازش بررسی و تأیید می‌شود.
+@router.message(StateFilter(None), F.text.func(lambda t: bool(extract_tx_hash(t or ""))))
+async def crypto_tx_direct(message: Message, db: Database, service: Service, cfg: Settings) -> None:
+    tx_hash = extract_tx_hash(message.text or "")
+    if not tx_hash:
+        return
+    row = db.latest_waiting_crypto_payment(message.from_user.id)
+    if not row:
+        await message.answer(
+            "ℹ️ هش تراکنش دریافت شد، اما فاکتور پرداخت بازی برای شما پیدا نکردم.\n"
+            "ابتدا از «🛒 خرید سرویس» سفارش ثبت کنید و روش «پرداخت مستقیم USDT» را انتخاب کنید.",
+            reply_markup=back_to_menu_kb(),
         )
         return
-    credited = service.settle_crypto_payment(order_id, tx_hash)
-    if credited is None:
-        await wait.edit_text(
-            "ℹ️ این پرداخت قبلاً پردازش شده یا این هش برای سفارش دیگری ثبت شده است."
-        )
+    if int(row["credited"] or 0):
+        await message.answer("✅ این فاکتور قبلاً تأیید و تحویل شده است.")
         return
-    await wait.edit_text("✅ پرداخت تأیید شد! در حال تحویل سرویس...")
-    await deliver_paid_order(message.bot, cfg, db, service, credited)
+    wait = await message.answer("⏳ در حال بررسی تراکنش روی شبکه‌ی BSC...")
+    ok, msg = await _verify_and_settle(message.bot, db, service, cfg, row, tx_hash)
+    if ok:
+        await wait.edit_text("✅ پرداخت تأیید شد! سرویس در حال تحویل است...")
+    else:
+        await wait.edit_text(f"⛔️ تأیید نشد:\n{escape(msg)}\n\nپس از رفع مشکل، دوباره هش/لینک را بفرستید.")

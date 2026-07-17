@@ -8,7 +8,7 @@ from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, FSInputFile, Message
 
 from ..config import Settings
 from ..database import (
@@ -20,6 +20,7 @@ from ..database import (
 from ..crypto import is_valid_address
 from ..keyboards import (
     admin_panel_menu,
+    back_to_panel_kb,
     configs_list_keyboard,
     custbot_menu,
     discount_product_keyboard,
@@ -30,6 +31,7 @@ from ..keyboards import (
     settings_menu,
     setrole_keyboard,
     toggles_menu,
+    user_actions_kb,
     users_menu,
 )
 from ..service import (
@@ -81,25 +83,29 @@ ROLE_LABEL = {
 # ====================================================================== #
 #  ورود به پنل
 # ====================================================================== #
+def _panel_kb(db: Database) -> "object":
+    pending = len(db.list_pending_requests())
+    maint = db.get_setting("maintenance_mode", "0") == "1"
+    return admin_panel_menu(pending, maintenance_on=maint)
+
+
 @router.message(F.text == "🛠 پنل مدیریت")
 async def panel_root(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
-    pending = len(db.list_pending_requests())
-    await message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_menu(pending))
+    await message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=_panel_kb(db))
 
 
 @router.callback_query(F.data == "menu:admin")
 async def panel_root_cb(call: CallbackQuery, state: FSMContext, db: Database) -> None:
     await state.clear()
     await call.answer()
-    pending = len(db.list_pending_requests())
-    await call.message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=admin_panel_menu(pending))
+    await call.message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=_panel_kb(db))
 
 
 @router.callback_query(F.data == "adm:report")
 async def adm_report(call: CallbackQuery, service: Service) -> None:
     await call.answer()
-    await call.message.answer(service.build_report())
+    await call.message.answer(service.build_report(), reply_markup=back_to_panel_kb())
 
 
 @router.callback_query(F.data == "adm:configs")
@@ -107,12 +113,174 @@ async def adm_configs(call: CallbackQuery, db: Database) -> None:
     await call.answer()
     rows = db.list_all_configs()
     if not rows:
-        await call.message.answer("هیچ سرویس فعالی وجود ندارد.")
+        await call.message.answer("هیچ سرویس فعالی وجود ندارد.", reply_markup=back_to_panel_kb())
         return
     await call.message.answer(
         f"🧾 سرویس‌های فعال (<b>{len(rows)}</b>) — یکی را انتخاب کنید:",
         reply_markup=configs_list_keyboard(rows[:50], show_owner=True),
     )
+
+
+# ====================================================================== #
+#  پروفایل / مدیریت کاربر
+# ====================================================================== #
+@router.callback_query(F.data == "adm:userinfo")
+async def adm_userinfo(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminStates.userinfo_id)
+    await call.answer()
+    await call.message.answer("🔎 آیدی عددی کاربر را بفرستید تا پروفایلش را ببینید:")
+
+
+def _user_profile_text(db: Database, service: Service, tg_id: int) -> str:
+    row = db.get_user(tg_id)
+    if not row:
+        return f"کاربر <code>{tg_id}</code> در دیتابیس پیدا نشد (هنوز /start نزده)."
+    role = row["role"] if row else "user"
+    role_label = ROLE_LABEL.get(role, "کاربر عادی") if role != "admin" else "ادمین"
+    banned = "🚫 بله" if db.is_banned(tg_id) else "خیر"
+    ref_by = db.get_referrer(tg_id)
+    lines = [
+        f"👤 <b>پروفایل کاربر</b> <code>{tg_id}</code>",
+        f"• نام: {escape(row['name'] or '—')}",
+        f"• نقش: <b>{role_label}</b>",
+        f"• موجودی: <b>{float(row['balance']):g} {service.currency}</b>",
+        f"• مسدود: {banned}",
+        f"• تعداد سرویس فعال: <b>{db.count_configs(tg_id)}</b>",
+        f"• معرف (دعوت‌کننده): {('<code>'+str(ref_by)+'</code>') if ref_by else '—'}",
+        f"• تعداد دعوت‌شده‌ها: <b>{db.count_referrals(tg_id)}</b>",
+        f"• درآمد رفرال: <b>{db.ref_earnings(tg_id):g} {service.currency}</b>",
+    ]
+    discs = db.list_discounts_for(tg_id)
+    if discs:
+        lines.append("• تخفیف‌ها: " + "، ".join(
+            f"{_DISCOUNT_PRODUCT_LABEL.get(d['product'], d['product'])} {float(d['percent']):g}%"
+            for d in discs
+        ))
+    return "\n".join(lines)
+
+
+@router.message(AdminStates.userinfo_id)
+async def userinfo_id(message: Message, state: FSMContext, db: Database, service: Service) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("⛔️ آیدی باید عددی باشد.")
+        return
+    await state.clear()
+    tg_id = int(text)
+    await message.answer(
+        _user_profile_text(db, service, tg_id),
+        reply_markup=user_actions_kb(tg_id, banned=db.is_banned(tg_id)),
+    )
+
+
+@router.callback_query(F.data.startswith("uinfo:"))
+async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, service: Service) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    action, tg_id = parts[1], int(parts[2])
+    if action == "ban":
+        db.set_banned(tg_id, True)
+        await call.answer("کاربر مسدود شد.")
+        try:
+            await call.message.edit_text(
+                _user_profile_text(db, service, tg_id),
+                reply_markup=user_actions_kb(tg_id, banned=True),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    elif action == "unban":
+        db.set_banned(tg_id, False)
+        await call.answer("رفع مسدودی شد.")
+        try:
+            await call.message.edit_text(
+                _user_profile_text(db, service, tg_id),
+                reply_markup=user_actions_kb(tg_id, banned=False),
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    elif action == "role":
+        await call.answer()
+        await call.message.answer(
+            f"نقش کاربر <code>{tg_id}</code> را انتخاب کنید:",
+            reply_markup=setrole_keyboard(tg_id),
+        )
+    elif action == "credit":
+        await state.set_state(AdminStates.credit_amount)
+        await state.update_data(credit_id=tg_id)
+        await call.answer()
+        await call.message.answer(
+            f"مبلغ تغییر موجودی برای <code>{tg_id}</code> را وارد کنید (منفی = کسر):"
+        )
+    else:
+        await call.answer("نامعتبر", show_alert=True)
+
+
+# ====================================================================== #
+#  تراکنش‌ها
+# ====================================================================== #
+_PMETHOD_LABEL = {"crypto": "USDT مستقیم", "nowpayments": "درگاه", "": "—"}
+
+
+@router.callback_query(F.data == "adm:payments")
+async def adm_payments(call: CallbackQuery, db: Database) -> None:
+    await call.answer()
+    rows = db.list_recent_payments(20)
+    if not rows:
+        await call.message.answer("هنوز تراکنشی ثبت نشده است.", reply_markup=back_to_panel_kb())
+        return
+    lines = ["🧾 <b>۲۰ تراکنش اخیر</b>", ""]
+    for r in rows:
+        st = str(r["status"] or "")
+        mark = "✅" if int(r["credited"] or 0) else ("⏳" if st == "waiting" else "❌")
+        method = _PMETHOD_LABEL.get((r["method"] or ""), r["method"] or "—")
+        purpose = "شارژ" if r["purpose"] != "order" else "خرید"
+        lines.append(
+            f"{mark} <code>{r['tg_id']}</code> • {float(r['amount']):g} {escape(r['currency'])} "
+            f"• {purpose} • {escape(method)} • {escape(st)}"
+        )
+    await call.message.answer("\n".join(lines), reply_markup=back_to_panel_kb())
+
+
+# ====================================================================== #
+#  پشتیبان دیتابیس
+# ====================================================================== #
+@router.callback_query(F.data == "adm:backup")
+async def adm_backup(call: CallbackQuery, db: Database) -> None:
+    await call.answer("در حال آماده‌سازی فایل پشتیبان...")
+    try:
+        # اطمینان از فلاش شدن WAL روی فایل اصلی
+        try:
+            db.execute("PRAGMA wal_checkpoint(FULL)")
+        except Exception:  # noqa: BLE001
+            pass
+        path = str(db.path)
+        await call.message.answer_document(
+            FSInputFile(path, filename="resibot-backup.db"),
+            caption="💾 نسخه‌ی پشتیبان دیتابیس. آن را جای امنی نگه دارید.",
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("backup failed")
+        await call.message.answer(f"❌ خطا در تهیه‌ی پشتیبان:\n<code>{escape(str(exc))}</code>")
+
+
+# ====================================================================== #
+#  حالت تعمیر
+# ====================================================================== #
+@router.callback_query(F.data == "adm:maint")
+async def adm_maint(call: CallbackQuery, db: Database) -> None:
+    cur = db.get_setting("maintenance_mode", "0") == "1"
+    new_val = not cur
+    db.set_setting("maintenance_mode", "1" if new_val else "0")
+    await call.answer(
+        "🔧 حالت تعمیر روشن شد (فقط ادمین دسترسی دارد)." if new_val else "🟢 حالت تعمیر خاموش شد.",
+        show_alert=True,
+    )
+    try:
+        await call.message.edit_reply_markup(reply_markup=_panel_kb(db))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ====================================================================== #
@@ -213,12 +381,12 @@ async def usr_list_v2(call: CallbackQuery, db: Database) -> None:
 
 async def _send_user_list(call: CallbackQuery, rows, title: str) -> None:
     if not rows:
-        await call.message.answer(f"هیچ {title} ثبت نشده است.")
+        await call.message.answer(f"هیچ {title} ثبت نشده است.", reply_markup=back_to_panel_kb())
         return
     lines = [f"📋 <b>{title}:</b>"]
     for r in rows[:50]:
         lines.append(f"• <code>{r['tg_id']}</code> — موجودی {float(r['balance']):g} — {escape(r['name'] or '')}")
-    await call.message.answer("\n".join(lines))
+    await call.message.answer("\n".join(lines), reply_markup=back_to_panel_kb())
 
 
 @router.callback_query(F.data == "usr:setrole")
@@ -581,8 +749,7 @@ def _discounts_list_kb(rows):
             text=f"❌ {r['tg_id']} — {_DISCOUNT_PRODUCT_LABEL.get(r['product'], r['product'])}",
             callback_data=f"disc:del:{r['tg_id']}:{r['product']}",
         )])
-    if not kb:
-        kb.append([InlineKeyboardButton(text="—", callback_data="noop")])
+    kb.append([InlineKeyboardButton(text="🔙 بازگشت به پنل", callback_data="menu:admin")])
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
