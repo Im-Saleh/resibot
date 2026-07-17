@@ -21,6 +21,7 @@ from ..keyboards import (
     country_results_keyboard,
     life_keyboard,
     options_keyboard,
+    pay_methods_keyboard,
 )
 from ..proxy import normalize_code, validate_code
 from ..service import InsufficientBalance, Service
@@ -53,16 +54,26 @@ def _list_rows(uid: int, cfg: Settings, db: Database):
 # ---------------------------------------------------------------------- #
 #  لیست کانفیگ‌ها (سطح ۱)
 # ---------------------------------------------------------------------- #
-@router.message(F.text == "🧾 سرویس‌های من")
-async def my_configs(message: Message, db: Database, cfg: Settings) -> None:
-    rows, show_owner = _list_rows(message.from_user.id, cfg, db)
+async def _send_my_configs(target: Message, uid: int, cfg: Settings, db: Database) -> None:
+    rows, show_owner = _list_rows(uid, cfg, db)
     if not rows:
-        await message.answer("شما هنوز کانفیگی ندارید. از «🛒 سفارش جدید» استفاده کنید.")
+        await target.answer("شما هنوز کانفیگی ندارید. از «🛒 خرید سرویس» استفاده کنید.")
         return
-    await message.answer(
+    await target.answer(
         f"🧾 کانفیگ‌های شما (<b>{len(rows)}</b>) — یکی را انتخاب کنید:",
         reply_markup=configs_list_keyboard(rows[:50], show_owner=show_owner),
     )
+
+
+@router.message(F.text == "🧾 سرویس‌های من")
+async def my_configs(message: Message, db: Database, cfg: Settings) -> None:
+    await _send_my_configs(message, message.from_user.id, cfg, db)
+
+
+@router.callback_query(F.data == "menu:configs")
+async def my_configs_cb(call: CallbackQuery, db: Database, cfg: Settings) -> None:
+    await call.answer()
+    await _send_my_configs(call.message, call.from_user.id, cfg, db)
 
 
 @router.callback_query(F.data == "cfg_back")
@@ -337,12 +348,52 @@ async def city_set(call: CallbackQuery, service: Service, db: Database, cfg: Set
 #  تمدید / افزایش حجم
 # ====================================================================== #
 @router.callback_query(F.data.startswith("cfg_renew:"))
-async def renew_start(call: CallbackQuery, state: FSMContext, db: Database, service: Service, cfg: Settings) -> None:
+async def renew_start(
+    call: CallbackQuery, state: FSMContext, db: Database, service: Service,
+    cfg: Settings, role: str, is_admin: bool,
+) -> None:
     config_id = int(call.data.split(":", 1)[1])
     row = _access_or_none(config_id, call.from_user.id, cfg, db)
     if not row:
         await call.answer("دسترسی ندارید یا سرویس یافت نشد.", show_alert=True)
         return
+    product = row["product_type"] or "residential"
+
+    # --- تمدید V2Ray: انقضا از همین لحظه ۳۰ روز ریست می‌شود (نه افزودنی) ---
+    if product == "v2ray":
+        await call.answer()
+        if is_admin:
+            wait = await call.message.answer("⏳ در حال تمدید V2Ray...")
+            try:
+                info = await service.renew_v2ray(config_id, price=0.0)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("v2ray renew (admin) failed")
+                await wait.edit_text(f"❌ خطا در تمدید:\n<code>{exc}</code>")
+                return
+            await wait.edit_text(
+                "✅ <b>تمدید V2Ray انجام شد</b>\n"
+                f"📦 حجم: <b>نامحدود</b> ♾\n"
+                f"📅 انقضای جدید: از همین لحظه <b>{info['days']} روز</b>"
+            )
+            return
+        methods = service.enabled_pay_methods()
+        if not methods:
+            await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست.")
+            return
+        price = service.v2ray_plan_price_for(role)
+        order_id = service.create_order_payment(
+            call.from_user.id, product="v2ray", usd=price,
+            meta_extra={"renew_config_id": config_id},
+        )
+        await call.message.answer(
+            "♻️ <b>تمدید پلن V2Ray (یک‌ماهه نامحدود)</b>\n\n"
+            f"📅 با پرداخت، انقضا از همین لحظه <b>{service.v2ray_plan_days} روز</b> ریست می‌شود.\n"
+            f"💵 مبلغ: <b>{price:g} USDT</b>\n\n"
+            "روش پرداخت را انتخاب کنید:",
+            reply_markup=pay_methods_keyboard(order_id, methods),
+        )
+        return
+
     await call.answer()
     await state.set_state(ConfigStates.entering_renew_volume)
     await state.update_data(config_id=config_id)

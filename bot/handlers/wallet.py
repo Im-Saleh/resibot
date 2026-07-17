@@ -1,4 +1,4 @@
-"""کیف پول (شارژ با NowPayments) و درخواست همکاری."""
+"""کیف پول (شارژ با روش‌های پرداخت) و درخواست همکاری."""
 from __future__ import annotations
 
 import logging
@@ -6,12 +6,7 @@ from html import escape
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Message,
-)
+from aiogram.types import CallbackQuery, Message
 
 from ..config import Settings
 from ..database import (
@@ -19,7 +14,12 @@ from ..database import (
     ROLE_RESIDENTIAL_RESELLER,
     ROLE_V2RAY_RESELLER,
 )
-from ..keyboards import partnership_menu, request_decision_keyboard, wallet_menu
+from ..keyboards import (
+    pay_methods_keyboard,
+    partnership_menu,
+    request_decision_keyboard,
+    wallet_menu,
+)
 from ..service import S_SHOW_PARTNERSHIP, Service
 from ..states import PartnershipStates, WalletStates
 
@@ -33,23 +33,35 @@ MAX_TOPUP = 1_000_000_000.0
 # ====================================================================== #
 #  کیف پول
 # ====================================================================== #
-@router.message(F.text == "💼 کیف پول")
-async def wallet_view(message: Message, state: FSMContext, db: Database, service: Service, cfg: Settings) -> None:
-    await state.clear()
-    bal = db.get_balance(message.from_user.id)
+async def _send_wallet(target: Message, db: Database, service: Service) -> None:
+    bal = db.get_balance(target.chat.id)
+    methods = service.enabled_pay_methods()
     text = (
         "💼 <b>کیف پول شما</b>\n\n"
         f"💰 موجودی: <b>{bal:g} {service.currency}</b>\n"
     )
-    if not cfg.nowpayments_enabled:
+    if not methods:
         text += "\n⚠️ شارژ آنلاین فعلاً غیرفعال است. برای شارژ با ادمین هماهنگ کنید."
-    await message.answer(text, reply_markup=wallet_menu(topup_enabled=cfg.nowpayments_enabled))
+    await target.answer(text, reply_markup=wallet_menu(topup_enabled=bool(methods)))
+
+
+@router.message(F.text == "💼 کیف پول")
+async def wallet_view(message: Message, state: FSMContext, db: Database, service: Service) -> None:
+    await state.clear()
+    await _send_wallet(message, db, service)
+
+
+@router.callback_query(F.data == "menu:wallet")
+async def wallet_view_cb(call: CallbackQuery, state: FSMContext, db: Database, service: Service) -> None:
+    await state.clear()
+    await call.answer()
+    await _send_wallet(call.message, db, service)
 
 
 @router.callback_query(F.data == "wallet:topup")
-async def wallet_topup_start(call: CallbackQuery, state: FSMContext, cfg: Settings, service: Service) -> None:
-    if not cfg.nowpayments_enabled:
-        await call.answer("درگاه پرداخت پیکربندی نشده است.", show_alert=True)
+async def wallet_topup_start(call: CallbackQuery, state: FSMContext, service: Service) -> None:
+    if not service.enabled_pay_methods():
+        await call.answer("هیچ روش پرداختی فعال نیست.", show_alert=True)
         return
     await call.answer()
     await state.set_state(WalletStates.entering_amount)
@@ -60,7 +72,7 @@ async def wallet_topup_start(call: CallbackQuery, state: FSMContext, cfg: Settin
 
 
 @router.message(WalletStates.entering_amount)
-async def wallet_topup_amount(message: Message, state: FSMContext, service: Service, cfg: Settings) -> None:
+async def wallet_topup_amount(message: Message, state: FSMContext, service: Service) -> None:
     raw = (message.text or "").strip().replace(",", ".")
     try:
         amount = round(float(raw), 2)
@@ -70,50 +82,61 @@ async def wallet_topup_amount(message: Message, state: FSMContext, service: Serv
     if amount <= 0 or amount > MAX_TOPUP:
         await message.answer(f"⛔️ مبلغ باید بین ۰ و {MAX_TOPUP:g} باشد.")
         return
-    await state.clear()
-    wait = await message.answer("⏳ در حال ساخت لینک پرداخت...")
-    try:
-        inv = await service.create_wallet_topup(message.from_user.id, amount)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("topup failed")
-        await wait.edit_text(f"❌ خطا در ساخت لینک پرداخت:\n<code>{escape(str(exc))}</code>")
+    methods = service.enabled_pay_methods()
+    if not methods:
+        await state.clear()
+        await message.answer("⛔️ هیچ روش پرداختی فعال نیست.")
         return
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="💳 پرداخت با USDT (TRC20)", url=inv["invoice_url"])]]
-    )
-    await wait.edit_text(
-        f"🧾 فاکتور شارژ <b>{amount:g} {service.currency}</b> ساخته شد.\n"
-        f"≈ <b>{inv['usd_amount']:g} USDT</b> (شبکه ترون / TRC20)\n\n"
-        "روی دکمه‌ی زیر بزنید و پرداخت را انجام دهید. پس از تأیید، موجودی شما خودکار شارژ می‌شود.",
-        reply_markup=kb,
+    await state.clear()
+    try:
+        order_id, usd = service.create_topup_payment(message.from_user.id, amount)
+    except ValueError as exc:
+        await message.answer(f"⛔️ {escape(str(exc))}")
+        return
+    await message.answer(
+        f"🧾 <b>شارژ کیف پول</b>\n"
+        f"💰 مبلغ: <b>{amount:g} {service.currency}</b> (≈ {usd:g} USDT)\n\n"
+        "روش پرداخت را انتخاب کنید:",
+        reply_markup=pay_methods_keyboard(order_id, methods),
     )
 
 
 # ====================================================================== #
 #  درخواست همکاری
 # ====================================================================== #
-@router.message(F.text == "🤝 همکاری")
-async def partnership_root(message: Message, state: FSMContext, db: Database, service: Service, role: str, is_admin: bool) -> None:
-    await state.clear()
+async def _send_partnership(target: Message, db: Database, service: Service, role: str, is_admin: bool) -> None:
     if is_admin:
-        await message.answer("شما ادمین هستید.")
+        await target.answer("شما ادمین هستید.")
         return
     if not service.feature_enabled(S_SHOW_PARTNERSHIP):
-        await message.answer("بخش همکاری در حال حاضر غیرفعال است.")
+        await target.answer("بخش همکاری در حال حاضر غیرفعال است.")
         return
     if role in (ROLE_RESIDENTIAL_RESELLER, ROLE_V2RAY_RESELLER):
-        await message.answer("شما در حال حاضر همکار هستید. ✅")
+        await target.answer("شما در حال حاضر همکار هستید. ✅")
         return
-    if db.has_pending_request(message.from_user.id):
-        await message.answer("⏳ یک درخواست همکاری در انتظار بررسی دارید.")
+    if db.has_pending_request(target.chat.id):
+        await target.answer("⏳ یک درخواست همکاری در انتظار بررسی دارید.")
         return
-    await message.answer(
+    await target.answer(
         "🤝 <b>درخواست همکاری</b>\n\n"
         "• همکاری <b>رزیدنتال</b> فقط توسط ادمین تعیین می‌شود (قابل درخواست نیست).\n"
         "• همکاری <b>V2Ray</b> با پیش‌پرداخت و داشتن حداقل موجودی امکان‌پذیر است.\n\n"
         "برای درخواست همکاری V2Ray دکمه‌ی زیر را بزنید:",
         reply_markup=partnership_menu(),
     )
+
+
+@router.message(F.text == "🤝 همکاری")
+async def partnership_root(message: Message, state: FSMContext, db: Database, service: Service, role: str, is_admin: bool) -> None:
+    await state.clear()
+    await _send_partnership(message, db, service, role, is_admin)
+
+
+@router.callback_query(F.data == "menu:partner")
+async def partnership_root_cb(call: CallbackQuery, state: FSMContext, db: Database, service: Service, role: str, is_admin: bool) -> None:
+    await state.clear()
+    await call.answer()
+    await _send_partnership(call.message, db, service, role, is_admin)
 
 
 @router.callback_query(F.data.startswith("partner:"))
@@ -135,12 +158,10 @@ async def partnership_choose(call: CallbackQuery, state: FSMContext, db: Databas
     await state.set_state(PartnershipStates.entering_description)
     await state.update_data(ptype=ptype)
     await call.answer()
-    extra = ""
-    if ptype == "v2ray":
-        extra = (
-            f"\n\n⚠️ همکاری V2Ray پیش‌پرداخت است و باید حداقل موجودی "
-            f"<b>{service.reseller_min_balance:g} {service.currency}</b> در کیف پول داشته باشید."
-        )
+    extra = (
+        f"\n\n⚠️ همکاری V2Ray پیش‌پرداخت است و باید حداقل موجودی "
+        f"<b>{service.reseller_min_balance:g} {service.currency}</b> در کیف پول داشته باشید."
+    )
     await call.message.answer(
         f"📝 لطفاً توضیح کوتاهی درباره‌ی خودتان و درخواست همکاری ({PTYPE_LABEL[ptype]}) بنویسید:{extra}"
     )

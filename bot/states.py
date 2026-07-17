@@ -38,6 +38,11 @@ class WalletStates(StatesGroup):
     entering_amount = State()
 
 
+class CryptoPayStates(StatesGroup):
+    """ثبت دستی هش تراکنش پرداخت مستقیم کریپتو."""
+    entering_tx = State()
+
+
 class PartnershipStates(StatesGroup):
     """درخواست همکاری."""
     entering_description = State()
@@ -62,6 +67,13 @@ class AdminStates(StatesGroup):
     set_iproyal_port = State()
     set_iproyal_username = State()
     set_iproyal_password = State()
+    # روش‌های پرداخت / کریپتو / پلن V2Ray
+    set_crypto_wallet = State()
+    set_bsc_rpc = State()
+    set_crypto_conf = State()
+    set_v2ray_inbound = State()
+    set_v2ray_plan_price = State()
+    set_v2ray_plan_reseller = State()
     setrole_id = State()
     credit_id = State()
     credit_amount = State()

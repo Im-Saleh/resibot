@@ -141,7 +141,21 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask RESELLER_MIN_BALANCE "حداقل موجودی همکار v2ray" "5000000"
 
   echo
-  bold "— درگاه پرداخت NowPayments (برای شارژ کیف پول) —"
+  bold "— پرداخت مستقیم کریپتو (USDT روی BEP20) —"
+  echo "پول مستقیم به ولت شما واریز می‌شود (بدون واسطه/فی). فقط رصد است، کلید خصوصی لازم نیست."
+  ask CRYPTO_WALLET_ADDRESS "آدرس ولت مقصد USDT (BEP20 / 0x...)" "0x0E2D801A5A769d7C508C0602E70cec3D1386943D"
+  echo "  (پیش‌فرض برای تأیید دستی با هش عالی است؛ برای تأیید خودکار RPC با getLogs بگذارید)"
+  ask BSC_RPC_URL "آدرس RPC شبکه BSC" "https://bsc-dataseed.binance.org"
+  ask CRYPTO_CONFIRMATIONS "تعداد تأیید لازم قبل از تحویل" "12"
+
+  echo
+  bold "— پلن V2Ray (یک‌ماهه نامحدود) —"
+  ask V2RAY_INBOUND_ID "شناسه اینباند V2Ray در پنل" "6"
+  ask V2RAY_PLAN_PRICE "قیمت پلن V2Ray عادی (USDT)" "5"
+  ask V2RAY_PLAN_RESELLER_PRICE "قیمت پلن V2Ray همکار (USDT)" "3.5"
+
+  echo
+  bold "— درگاه پرداخت NowPayments (اختیاری، روش دوم) —"
   ask NOWPAYMENTS_API_KEY "NowPayments API Key" "WYVJA75-C4AMHZA-GTH583W-MD9GR9R"
   ask NOWPAYMENTS_IPN_SECRET "NowPayments IPN Secret" "A8+fRQbTiIxxmmQcMa20zBT7sg1BcTN+"
   ask NOWPAYMENTS_PUBLIC_KEY "NowPayments Public Key" "62869df6-47c1-4cf5-a446-47c405fccbab"
@@ -219,12 +233,24 @@ NOWPAYMENTS_API_KEY=${NOWPAYMENTS_API_KEY}
 NOWPAYMENTS_IPN_SECRET=${NOWPAYMENTS_IPN_SECRET}
 NOWPAYMENTS_PUBLIC_KEY=${NOWPAYMENTS_PUBLIC_KEY}
 NOWPAYMENTS_PRICE_CURRENCY=${NOWPAYMENTS_PRICE_CURRENCY}
-NOWPAYMENTS_PAY_CURRENCY=usdttrc20
+NOWPAYMENTS_PAY_CURRENCY=usdtbsc
 PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
 IPN_HOST=0.0.0.0
 IPN_PORT=${IPN_PORT}
 IPN_CERT_FILE=${IPN_CERT_FILE}
 IPN_KEY_FILE=${IPN_KEY_FILE}
+
+CRYPTO_WALLET_ADDRESS=${CRYPTO_WALLET_ADDRESS}
+BSC_RPC_URL=${BSC_RPC_URL}
+CRYPTO_CONFIRMATIONS=${CRYPTO_CONFIRMATIONS}
+CRYPTO_PAYMENT_TTL_MIN=60
+PAY_CRYPTO_ENABLED=1
+PAY_NOWPAYMENTS_ENABLED=1
+
+V2RAY_INBOUND_ID=${V2RAY_INBOUND_ID}
+V2RAY_PLAN_DAYS=30
+V2RAY_PLAN_PRICE=${V2RAY_PLAN_PRICE}
+V2RAY_PLAN_RESELLER_PRICE=${V2RAY_PLAN_RESELLER_PRICE}
 
 DB_PATH=data/resibot.db
 EOF

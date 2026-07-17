@@ -6,7 +6,7 @@ from aiogram import Dispatcher
 from ..config import Settings
 from ..database import Database
 from ..filters import IsAdmin
-from . import admin, common, configs, order, wallet
+from . import admin, common, configs, order, payments, wallet
 
 
 def register_handlers(dp: Dispatcher, cfg: Settings, db: Database) -> None:
@@ -20,4 +20,5 @@ def register_handlers(dp: Dispatcher, cfg: Settings, db: Database) -> None:
     dp.include_router(admin.router)
     dp.include_router(wallet.router)
     dp.include_router(order.router)
+    dp.include_router(payments.router)
     dp.include_router(configs.router)

@@ -353,13 +353,20 @@ def test_products_menu_hides_disabled():
 
 
 def test_main_menu_hides_partnership():
+    # منوی اصلی حالا شیشه‌ای (inline) است؛ مخفی‌سازی باید بلافاصله اعمال شود.
     from bot.keyboards import main_menu
     kb = main_menu(show_partnership=False)
-    texts = [b.text for row in kb.keyboard for b in row]
+    texts = [b.text for row in kb.inline_keyboard for b in row]
     assert "🤝 همکاری" not in texts
     kb2 = main_menu(show_partnership=True)
-    texts2 = [b.text for row in kb2.keyboard for b in row]
+    texts2 = [b.text for row in kb2.inline_keyboard for b in row]
     assert "🤝 همکاری" in texts2
+    # برای ادمین همیشه نمایش داده می‌شود حتی اگر خاموش باشد
+    kb3 = main_menu(is_admin=True, show_partnership=False)
+    texts3 = [b.text for row in kb3.inline_keyboard for b in row]
+    assert "🤝 همکاری" in texts3
+    # همه‌ی دکمه‌ها callback_data دارند (شیشه‌ای)
+    assert all(b.callback_data for row in kb2.inline_keyboard for b in row)
 
 
 # --------------------------- customer bot ------------------------------ #

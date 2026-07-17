@@ -13,8 +13,8 @@ from aiohttp import web
 
 from .config import Settings
 from .database import Database
+from .fulfillment import deliver_paid_order
 from .nowpayments import PAID_STATUSES, verify_ipn_signature
-from .utils import provision_message
 
 logger = logging.getLogger("resibot.ipn")
 
@@ -53,45 +53,8 @@ def make_ipn_app(cfg: Settings, db: Database, bot: Any, service: Any = None) -> 
         if status in PAID_STATUSES:
             credited = db.credit_payment_once(order_id)
             if credited is not None:
-                purpose = credited["purpose"]
-                tg_id = int(credited["tg_id"])
-                amount = float(credited["amount"])
-                if purpose == "order" and service is not None:
-                    # سفارش رزیدنتال با پرداخت آنلاین → ساخت خودکار سرویس
-                    try:
-                        result = await service.provision_paid_order(credited)
-                        await bot.send_message(
-                            tg_id,
-                            "✅ پرداخت شما تأیید شد و سرویس ساخته شد:\n\n" + provision_message(result),
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.exception("ساخت سرویس پس از پرداخت ناموفق بود (order=%s)", order_id)
-                        try:
-                            await bot.send_message(
-                                tg_id,
-                                "✅ پرداخت شما تأیید شد، اما در ساخت خودکار سرویس خطایی رخ داد. "
-                                "لطفاً به ادمین اطلاع دهید.",
-                            )
-                            await bot.send_message(
-                                cfg.admin_id,
-                                f"⚠️ پرداخت order={order_id} تأیید شد ولی ساخت سرویس برای "
-                                f"<code>{tg_id}</code> ناموفق بود. دستی بررسی کنید.",
-                            )
-                        except Exception:  # noqa: BLE001
-                            pass
-                else:
-                    # شارژ کیف پول
-                    new_balance = db.add_balance(tg_id, amount)
-                    logger.info("کیف پول %s به مبلغ %s شارژ شد (order=%s)", tg_id, amount, order_id)
-                    try:
-                        await bot.send_message(
-                            tg_id,
-                            f"✅ پرداخت شما تأیید شد.\n"
-                            f"💰 مبلغ <b>{amount:g} {credited['currency']}</b> به کیف پول شما اضافه شد.\n"
-                            f"💼 موجودی فعلی: <b>{new_balance:g} {credited['currency']}</b>",
-                        )
-                    except Exception:  # noqa: BLE001
-                        logger.warning("اطلاع‌رسانی شارژ به کاربر %s ناموفق بود", tg_id)
+                # تحویل یکپارچه (رزیدنتال/V2Ray/شارژ کیف پول) — دقیقاً مثل مسیر کریپتو.
+                await deliver_paid_order(bot, cfg, db, service, credited)
 
         return web.json_response({"ok": True})
 

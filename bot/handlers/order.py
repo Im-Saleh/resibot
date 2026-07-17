@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import F, Router
 from aiogram.filters import StateFilter
@@ -34,6 +35,7 @@ from ..keyboards import (
     country_results_keyboard,
     life_keyboard,
     options_keyboard,
+    pay_methods_keyboard,
 )
 from ..proxy import ProxyLocation, normalize_code, validate_code
 from ..service import InsufficientBalance, Service
@@ -81,15 +83,46 @@ async def buy_residential2(call: CallbackQuery, state: FSMContext, service: Serv
 
 
 @router.callback_query(F.data == "buy:v2ray")
-async def buy_v2ray(call: CallbackQuery, service: Service) -> None:
+async def buy_v2ray(
+    call: CallbackQuery, service: Service, cfg: Settings, role: str, is_admin: bool
+) -> None:
     await call.answer()
     if not service.product_enabled("v2ray"):
         await call.message.answer("🛡 محصول V2Ray در حال حاضر غیرفعال است.")
         return
+
+    # ادمین: ساخت فوری و رایگان
+    if is_admin:
+        wait = await call.message.answer("⏳ در حال ساخت سرویس V2Ray (نامحدود)...")
+        try:
+            info = await service.provision_v2ray(call.from_user.id, price=0.0, payer="admin")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("v2ray provision (admin) failed")
+            await wait.edit_text(f"❌ خطا در ساخت سرویس V2Ray:\n<code>{exc}</code>")
+            return
+        await wait.delete()
+        from ..fulfillment import send_v2ray_delivery
+        await send_v2ray_delivery(call.bot, call.from_user.id, info)
+        return
+
+    methods = service.enabled_pay_methods()
+    if not methods:
+        await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست. با ادمین هماهنگ کنید.")
+        return
+    price = service.v2ray_plan_price_for(role)
+    if price <= 0:
+        await call.message.answer("⛔️ قیمت پلن V2Ray تنظیم نشده است. با ادمین هماهنگ کنید.")
+        return
+    order_id = service.create_order_payment(
+        call.from_user.id, product="v2ray", usd=price, meta_extra={}
+    )
     await call.message.answer(
-        "🛡 <b>کانفیگ V2Ray (عادی)</b>\n\n"
-        "این بخش به‌زودی فعال می‌شود. 🚧\n"
-        "پنل V2Ray در حال اتصال است."
+        "🛡 <b>پلن V2Ray — یک‌ماهه نامحدود</b>\n\n"
+        "📦 حجم: <b>نامحدود</b> ♾\n"
+        f"⏳ مدت: <b>{service.v2ray_plan_days} روز</b>\n"
+        f"💵 مبلغ: <b>{price:g} USDT</b>\n\n"
+        "روش پرداخت را انتخاب کنید:",
+        reply_markup=pay_methods_keyboard(order_id, methods),
     )
 
 
@@ -305,7 +338,7 @@ async def order_volume(message: Message, state: FSMContext, service: Service, ro
     elif payer == "admin":
         pay_line = "💳 پرداخت: <b>رایگان (ادمین)</b>"
     elif payer == "nowpayments":
-        pay_line = "💳 پرداخت: <b>آنلاین (USDT/TRC20)</b> — پس از پرداخت، سرویس خودکار ساخته می‌شود"
+        pay_line = "💳 پرداخت: <b>آنلاین (USDT)</b> — روش پرداخت را پس از تأیید انتخاب می‌کنید"
     else:
         bal = service.db.get_balance(message.from_user.id)
         pay_line = f"💳 پرداخت: از کیف پول | موجودی شما: <b>{bal:g} {service.currency}</b>"
@@ -350,31 +383,36 @@ async def order_confirm(call: CallbackQuery, state: FSMContext, service: Service
     payer = service._payer_for(role, product)
     product_txt = "رزیدنتال ۲" if product == PRODUCT_RESIDENTIAL2 else "رزیدنتال"
 
-    # کاربر عادی غیرهمکار: پرداخت آنلاین (اول پرداخت، بعد ساخت خودکار)
+    # کاربر عادی غیرهمکار: انتخاب روش پرداخت (اول پرداخت، بعد ساخت خودکار)
     if payer == "nowpayments":
-        if not cfg.nowpayments_enabled:
-            await call.message.answer("⛔️ درگاه پرداخت فعال نیست. با ادمین هماهنگ کنید.")
+        methods = service.enabled_pay_methods()
+        if not methods:
+            await call.message.answer("⛔️ در حال حاضر هیچ روش پرداختی فعال نیست. با ادمین هماهنگ کنید.")
             return
-        wait = await call.message.answer("⏳ در حال ساخت لینک پرداخت...")
         try:
-            info = await service.create_residential_order(
-                call.from_user.id, location, volume, life, product=product
+            price_usd = service.quote(role, product, volume)
+            order_id = service.create_order_payment(
+                call.from_user.id,
+                product=product,
+                usd=price_usd,
+                meta_extra={
+                    "area": location.area, "state": location.state, "city": location.city,
+                    "life": int(life or 0), "volume": int(volume),
+                },
             )
         except ValueError as exc:
-            await wait.edit_text(f"⛔️ {exc}")
+            await call.message.answer(f"⛔️ {escape(str(exc))}")
             return
         except Exception as exc:  # noqa: BLE001
             logger.exception("create order failed")
-            await wait.edit_text(f"❌ خطا در ساخت لینک پرداخت:\n<code>{exc}</code>")
+            await call.message.answer(f"❌ خطا در ساخت سفارش:\n<code>{escape(str(exc))}</code>")
             return
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="💳 پرداخت با USDT (TRC20)", url=info["invoice_url"])]]
-        )
-        await wait.edit_text(
-            f"🧾 فاکتور سرویس {product_txt} <b>{volume} GB</b> ساخته شد.\n"
-            f"≈ <b>{info['usd_amount']:g} USDT</b> (شبکه ترون / TRC20)\n\n"
-            "پس از پرداخت، سرویس به‌صورت خودکار ساخته و لینک‌ها برایتان ارسال می‌شود.",
-            reply_markup=kb,
+        await call.message.answer(
+            f"🧾 <b>فاکتور {product_txt}</b>\n"
+            f"📦 حجم: <b>{volume} GB</b>\n"
+            f"💵 مبلغ: <b>{price_usd:g} USDT</b>\n\n"
+            "روش پرداخت را انتخاب کنید:",
+            reply_markup=pay_methods_keyboard(order_id, methods),
         )
         return
 
