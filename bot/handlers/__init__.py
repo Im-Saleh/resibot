@@ -10,8 +10,8 @@ from . import admin, common, configs, digital, order, payments, products_admin, 
 
 
 def register_handlers(dp: Dispatcher, cfg: Settings, db: Database) -> None:
-    # پنل مدیریت فقط برای ادمین
-    is_admin = IsAdmin(cfg)
+    # پنل مدیریت فقط برای ادمین (اصلی یا اضافه‌شده)
+    is_admin = IsAdmin(cfg, db)
     admin.router.message.filter(is_admin)
     admin.router.callback_query.filter(is_admin)
     products_admin.router.message.filter(is_admin)

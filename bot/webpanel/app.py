@@ -53,12 +53,14 @@ def _client_ip(request: web.Request) -> str:
 
 def make_web_app(cfg: Settings, db: Database, service: Service) -> web.Application:
     is_https = bool(cfg.web_panel_cert_file and cfg.web_panel_key_file)
-    secret = cfg.web_panel_secret or secrets.token_hex(32)
+    # کلید امضا و رمز و لیست IP همگی «پویا» از سرویس/دیتابیس خوانده می‌شوند تا
+    # تغییرشان از داخل ربات بدون ری‌استارت اعمال شود.
+    secret = service.web_panel_secret or cfg.web_panel_secret or secrets.token_hex(32)
     sessions = SessionManager(secret)
     limiter = LoginRateLimiter()
-    allowed_ips = {
-        ip.strip() for ip in (cfg.web_panel_allowed_ips or "").split(",") if ip.strip()
-    }
+
+    def _allowed_ips() -> set[str]:
+        return {ip.strip() for ip in (service.web_panel_allowed_ips or "").split(",") if ip.strip()}
 
     app = web.Application()
 
@@ -96,6 +98,7 @@ def make_web_app(cfg: Settings, db: Database, service: Service) -> web.Applicati
 
     @web.middleware
     async def ip_allowlist_mw(request: web.Request, handler: Any) -> web.StreamResponse:
+        allowed_ips = _allowed_ips()
         if allowed_ips and _client_ip(request) not in allowed_ips:
             logger.warning("دسترسی پنل وب از IP غیرمجاز رد شد: %s", _client_ip(request))
             db.audit("web_ip_blocked", ip=_client_ip(request), detail=request.path)
@@ -153,7 +156,7 @@ def make_web_app(cfg: Settings, db: Database, service: Service) -> web.Applicati
         if not pre or not pre.get("pre") or not csrf_ok(str(pre.get("csrf", "")), submitted_csrf):
             return _html(T.login_page(csrf=new_csrf_token(), error="نشست منقضی شد. دوباره تلاش کنید."), status=400)
         password = str(data.get("password", ""))
-        if not verify_password(password, cfg.web_panel_password):
+        if not verify_password(password, service.web_panel_password):
             limiter.record_failure(ip)
             db.audit("web_login_fail", ip=ip)
             return _html(T.login_page(csrf=new_csrf_token(), error="رمز عبور اشتباه است."), status=401)
@@ -328,6 +331,109 @@ def make_web_app(cfg: Settings, db: Database, service: Service) -> web.Applicati
     async def audit_view(request: web.Request) -> web.Response:
         return _html(T.audit_page(db.list_audit(limit=100)))
 
+    # ---------------- درگاه‌های پرداخت ---------------- #
+    def _gateway_values(session: dict | None) -> dict:
+        from ..service import (
+            S_HOOSHPAY_ENABLED, S_PAY_CRYPTO_ENABLED, S_PAY_NOWPAYMENTS_ENABLED,
+        )
+        hp_key = service.hooshpay_api_key
+        return {
+            "hp_on": service.feature_enabled(S_HOOSHPAY_ENABLED, default=False),
+            "hp_key": hp_key,
+            "hp_secret": "",  # هرگز Secret را در فرم نشان نمی‌دهیم
+            "crypto_on": service.feature_enabled(S_PAY_CRYPTO_ENABLED),
+            "now_on": service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED),
+        }
+
+    async def gateways_get(request: web.Request) -> web.Response:
+        session = _session(request)
+        return _html(T.gateways_page(csrf=str(session.get("csrf", "")), values=_gateway_values(session)))
+
+    async def gateways_post(request: web.Request) -> web.StreamResponse:
+        session = _session(request)
+        if not await _check_csrf(request, session):
+            raise web.HTTPForbidden(text="CSRF")
+        from ..service import (
+            S_HOOSHPAY_API_KEY, S_HOOSHPAY_API_SECRET, S_HOOSHPAY_ENABLED,
+            S_PAY_CRYPTO_ENABLED, S_PAY_NOWPAYMENTS_ENABLED,
+        )
+        data = await request.post()
+        if data.get("section") == "crypto":
+            service.set_setting(S_PAY_CRYPTO_ENABLED, "1" if data.get("crypto_enabled") else "0")
+            service.set_setting(S_PAY_NOWPAYMENTS_ENABLED, "1" if data.get("now_enabled") else "0")
+            flash = "درگاه‌های ارزی ذخیره شد."
+        else:
+            service.set_setting(S_HOOSHPAY_ENABLED, "1" if data.get("hp_enabled") else "0")
+            key = str(data.get("hp_key", "")).strip()
+            if key:
+                service.set_setting(S_HOOSHPAY_API_KEY, key[:200])
+            secret = str(data.get("hp_secret", "")).strip()
+            if secret:
+                service.set_setting(S_HOOSHPAY_API_SECRET, secret[:200])
+            flash = "درگاه ریالی ذخیره شد."
+        db.audit("web_gateways_edit", actor="admin", ip=_client_ip(request), detail=str(data.get("section", "hooshpay")))
+        return _html(T.gateways_page(csrf=str(session.get("csrf", "")), values=_gateway_values(session), flash=flash))
+
+    # ---------------- DevOps / سیستم ---------------- #
+    def _system_stats() -> dict:
+        import os as _os
+        import sys as _sys
+        import glob as _glob
+        try:
+            db_size = _os.path.getsize(str(db.path))
+            db_size_h = f"{db_size/1024/1024:.2f} MB"
+        except OSError:
+            db_size_h = "—"
+        backups = sorted(_glob.glob(str(db.path) + "*.bak")) if False else []
+        # پوشه‌ی backups کنار فایل دیتابیس
+        bdir = _os.path.join(_os.path.dirname(str(db.path)), "..", "backups")
+        last_backup = "—"
+        try:
+            files = sorted(_glob.glob(_os.path.join(bdir, "resibot-*.db")))
+            if files:
+                last_backup = _os.path.basename(files[-1])
+        except OSError:
+            pass
+        try:
+            audit_rows = len(db.list_audit(limit=100000))
+        except Exception:  # noqa: BLE001
+            audit_rows = 0
+        return {
+            "db_size": db_size_h,
+            "users": db.count_users(),
+            "configs": len(db.list_all_configs()),
+            "manual_pending": db.count_manual_pending(),
+            "audit_rows": audit_rows,
+            "python": _sys.version.split()[0],
+            "maintenance": db.get_setting("maintenance_mode", "0") == "1",
+            "last_backup": last_backup,
+        }
+
+    async def system_get(request: web.Request) -> web.Response:
+        session = _session(request)
+        return _html(T.system_page(csrf=str(session.get("csrf", "")), stats=_system_stats()))
+
+    async def system_post(request: web.Request) -> web.StreamResponse:
+        session = _session(request)
+        if not await _check_csrf(request, session):
+            raise web.HTTPForbidden(text="CSRF")
+        data = await request.post()
+        action = str(data.get("action", ""))
+        flash = ""
+        if action == "backup":
+            flash = _do_backup(db)
+        elif action == "maint_on":
+            db.set_setting("maintenance_mode", "1")
+            flash = "حالت تعمیر روشن شد."
+        elif action == "maint_off":
+            db.set_setting("maintenance_mode", "0")
+            flash = "حالت تعمیر خاموش شد."
+        elif action == "prune_audit":
+            db.prune_audit(keep=2000)
+            flash = "لاگ‌های قدیمی هرس شدند."
+        db.audit("web_system_action", actor="admin", ip=_client_ip(request), detail=action)
+        return _html(T.system_page(csrf=str(session.get("csrf", "")), stats=_system_stats(), flash=flash))
+
     # ثبت مسیرها
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
@@ -345,6 +451,10 @@ def make_web_app(cfg: Settings, db: Database, service: Service) -> web.Applicati
     app.router.add_post("/panel/products/{pid:\\d+}/delete", product_delete_post)
     app.router.add_get("/panel/prices", prices_get)
     app.router.add_post("/panel/prices", prices_post)
+    app.router.add_get("/panel/gateways", gateways_get)
+    app.router.add_post("/panel/gateways", gateways_post)
+    app.router.add_get("/panel/system", system_get)
+    app.router.add_post("/panel/system", system_post)
     app.router.add_get("/panel/audit", audit_view)
     return app
 
@@ -364,6 +474,37 @@ def _render_prices(session: dict | None, service: Service, flash: str = "") -> s
     )
 
 
+def _do_backup(db: Database) -> str:
+    """یک نسخه‌ی پشتیبان سازگار با WAL از دیتابیس در پوشه‌ی backups می‌سازد."""
+    import os
+    import sqlite3
+    import time as _time
+    try:
+        base_dir = os.path.dirname(os.path.dirname(str(db.path)))
+        bdir = os.path.join(base_dir, "backups")
+        os.makedirs(bdir, exist_ok=True)
+        ts = _time.strftime("%Y%m%d-%H%M%S")
+        out = os.path.join(bdir, f"resibot-{ts}.db")
+        src = sqlite3.connect(str(db.path))
+        dst = sqlite3.connect(out)
+        with dst:
+            src.backup(dst)
+        src.close()
+        dst.close()
+        # چرخش: فقط ۲۰ نسخه‌ی اخیر
+        import glob
+        files = sorted(glob.glob(os.path.join(bdir, "resibot-*.db")))
+        for old in files[:-20]:
+            try:
+                os.remove(old)
+            except OSError:
+                pass
+        return f"پشتیبان ساخته شد: {os.path.basename(out)}"
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("backup failed")
+        return f"خطا در تهیه‌ی پشتیبان: {exc}"
+
+
 def _to_float(raw: Any, default):
     try:
         return round(float(str(raw).replace(",", ".")), 4)
@@ -378,20 +519,63 @@ def _to_int(raw: Any, default: int) -> int:
         return default
 
 
-async def start_web_panel(cfg: Settings, db: Database, service: Service) -> web.AppRunner:
-    """پنل وب را روی هاست/پورت تنظیم‌شده بالا می‌آورد و runner را برمی‌گرداند."""
-    app = make_web_app(cfg, db, service)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    ssl_context = None
-    if cfg.web_panel_cert_file and cfg.web_panel_key_file:
-        import ssl
-        ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        ssl_context.load_cert_chain(cfg.web_panel_cert_file, cfg.web_panel_key_file)
-    site = web.TCPSite(runner, cfg.web_panel_host, cfg.web_panel_port, ssl_context=ssl_context)
-    await site.start()
-    scheme = "https" if ssl_context else "http"
-    logger.info("پنل وب روی %s://%s:%s بالا آمد", scheme, cfg.web_panel_host, cfg.web_panel_port)
-    if not cfg.web_panel_secret:
-        logger.warning("WEB_PANEL_SECRET تنظیم نشده؛ با هر ری‌استارت همه‌ی سشن‌ها باطل می‌شوند.")
-    return runner
+class WebPanelManager:
+    """مدیریت چرخه‌ی حیات پنل وب با امکان استارت پویا از داخل ربات.
+
+    وقتی ادمین از داخل ربات رمز پنل وب را تنظیم می‌کند، بدون نیاز به ری‌استارتِ
+    کل سرویس، پنل وب با ensure_started() بالا می‌آید.
+    """
+
+    def __init__(self, cfg: Settings, db: Database, service: Service) -> None:
+        self.cfg = cfg
+        self.db = db
+        self.service = service
+        self._runner: web.AppRunner | None = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._runner is not None
+
+    async def ensure_started(self) -> bool:
+        """اگر پنل فعال و دارای رمز باشد و هنوز اجرا نشده، آن را بالا می‌آورد.
+
+        True یعنی الان در حال اجراست (چه از قبل، چه همین حالا استارت شد).
+        """
+        if self._runner is not None:
+            return True
+        if not self.service.web_panel_active:
+            return False
+        try:
+            await self._start()
+            return True
+        except Exception:  # noqa: BLE001
+            logger.exception("استارت پویای پنل وب ناموفق بود")
+            return False
+
+    async def _start(self) -> None:
+        cfg = self.cfg
+        app = make_web_app(cfg, self.db, self.service)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        ssl_context = None
+        if cfg.web_panel_cert_file and cfg.web_panel_key_file:
+            import ssl
+            ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
+            ssl_context.load_cert_chain(cfg.web_panel_cert_file, cfg.web_panel_key_file)
+        site = web.TCPSite(runner, cfg.web_panel_host, cfg.web_panel_port, ssl_context=ssl_context)
+        await site.start()
+        self._runner = runner
+        scheme = "https" if ssl_context else "http"
+        logger.info("پنل وب روی %s://%s:%s بالا آمد", scheme, cfg.web_panel_host, cfg.web_panel_port)
+
+    async def cleanup(self) -> None:
+        if self._runner is not None:
+            await self._runner.cleanup()
+            self._runner = None
+
+
+async def start_web_panel(cfg: Settings, db: Database, service: Service) -> WebPanelManager:
+    """پنل وب را (در صورت فعال بودن) بالا می‌آورد و مدیر آن را برمی‌گرداند."""
+    manager = WebPanelManager(cfg, db, service)
+    await manager.ensure_started()
+    return manager

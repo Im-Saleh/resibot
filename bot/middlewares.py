@@ -46,7 +46,9 @@ class ThrottleMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = data.get("event_from_user")
-        if user is None or user.id == self.cfg.admin_id:
+        if user is None or user.id == self.cfg.admin_id or (
+            self.db is not None and self.db.is_extra_admin(user.id)
+        ):
             return await handler(event, data)
 
         now = time.monotonic()
@@ -131,7 +133,7 @@ class ContextMiddleware(BaseMiddleware):
             # نام را برای نمایش ذخیره می‌کنیم (بدون اعتماد به محتوا برای منطق)
             name = (user.full_name or user.username or "")[:64]
             self.db.ensure_user(user.id, name)
-            is_admin = user.id == self.cfg.admin_id
+            is_admin = user.id == self.cfg.admin_id or self.db.is_extra_admin(user.id)
 
             # کاربران مسدودشده هیچ دسترسی‌ای ندارند (ادمین مستثناست).
             if not is_admin and self.db.is_banned(user.id):

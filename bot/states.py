@@ -72,6 +72,12 @@ class AdminStates(StatesGroup):
     set_crypto_wallet = State()
     set_bsc_rpc = State()
     set_crypto_conf = State()
+    # درگاه ریالی HooshPay
+    set_hooshpay_key = State()
+    set_hooshpay_secret = State()
+    # رمز پنل وب (تنظیم از داخل ربات)
+    set_web_password = State()
+    set_web_ips = State()
     set_v2ray_inbound = State()
     set_v2ray_plan_price = State()
     set_v2ray_plan_reseller = State()
@@ -94,3 +100,15 @@ class DigitalAdminStates(StatesGroup):
     new_price = State()      # قیمت محصول جدید (USD)
     edit_value = State()     # ویرایش یک فیلد مشخص (product_id + field در state ذخیره می‌شود)
     add_stock = State()      # افزودن موجودی (هر خط یک اکانت/کد)
+
+
+class DigitalManualStates(StatesGroup):
+    """دریافت اطلاعات اکانت از مشتری برای محصولات با تحویل دستی."""
+    entering_email = State()     # ایمیل اکانت مشتری
+    entering_password = State()  # رمز اکانت مشتری
+
+
+class AdminDMStates(StatesGroup):
+    """ارسال پیام مستقیم ادمین به یک کاربر مشخص + افزودن ادمین با آیدی."""
+    message_text = State()   # متن پیام (target_id در state)
+    add_admin_id = State()   # آیدی عددی برای ادمین‌کردن

@@ -88,6 +88,12 @@ S_SHOW_DIGITAL = "show_digital"
 # روش‌های پرداخت (فعال/غیرفعال) و تنظیمات کریپتو
 S_PAY_CRYPTO_ENABLED = "pay_crypto_enabled"
 S_PAY_NOWPAYMENTS_ENABLED = "pay_nowpayments_enabled"
+
+# درگاه ریالی HooshPay
+S_HOOSHPAY_ENABLED = "hooshpay_enabled"
+S_HOOSHPAY_API_KEY = "hooshpay_api_key"
+S_HOOSHPAY_API_SECRET = "hooshpay_api_secret"
+S_HOOSHPAY_BASE_URL = "hooshpay_base_url"
 S_CRYPTO_WALLET = "crypto_wallet_address"
 S_BSC_RPC = "bsc_rpc_url"
 S_CRYPTO_CONFIRMATIONS = "crypto_confirmations"
@@ -98,6 +104,12 @@ S_REFERRAL_PERCENT = "referral_percent"
 
 # حداقل مبلغ شارژ کیف پول
 S_MIN_TOPUP = "min_topup"
+
+# پنل وب مدیریتی (قابل تنظیم از داخل ربات)
+S_WEB_PANEL_PASSWORD = "web_panel_password"
+S_WEB_PANEL_SECRET = "web_panel_secret"
+S_WEB_PANEL_IPS = "web_panel_allowed_ips"
+S_WEB_PANEL_ENABLED = "web_panel_enabled"
 
 # پلن V2Ray (یک‌ماهه نامحدود)
 S_V2RAY_INBOUND_ID = "v2ray_inbound_id"
@@ -172,6 +184,11 @@ class Service:
         # روش‌های پرداخت + تنظیمات کریپتو
         self.db.seed_setting(S_PAY_CRYPTO_ENABLED, "1" if self.cfg.pay_crypto_enabled else "0")
         self.db.seed_setting(S_PAY_NOWPAYMENTS_ENABLED, "1" if self.cfg.pay_nowpayments_enabled else "0")
+        # درگاه ریالی HooshPay
+        self.db.seed_setting(S_HOOSHPAY_ENABLED, "1" if self.cfg.hooshpay_enabled else "0")
+        self.db.seed_setting(S_HOOSHPAY_API_KEY, self.cfg.hooshpay_api_key)
+        self.db.seed_setting(S_HOOSHPAY_API_SECRET, self.cfg.hooshpay_api_secret)
+        self.db.seed_setting(S_HOOSHPAY_BASE_URL, self.cfg.hooshpay_base_url)
         self.db.seed_setting(S_CRYPTO_WALLET, self.cfg.crypto_wallet_address)
         self.db.seed_setting(S_BSC_RPC, self.cfg.bsc_rpc_url)
         self.db.seed_setting(S_CRYPTO_CONFIRMATIONS, str(self.cfg.crypto_confirmations))
@@ -185,6 +202,16 @@ class Service:
         # نمایش/مخفی‌سازی بخش محصولات دیجیتال + محصولات پیش‌فرض
         self.db.seed_setting(S_SHOW_DIGITAL, "1")
         digital.seed_default_products(self.db)
+        # پنل وب: مقادیر اولیه از env؛ سپس از ربات/پنل قابل تغییر.
+        self.db.seed_setting(S_WEB_PANEL_ENABLED, "1" if self.cfg.web_panel_enabled else "0")
+        self.db.seed_setting(S_WEB_PANEL_PASSWORD, self.cfg.web_panel_password)
+        self.db.seed_setting(S_WEB_PANEL_IPS, self.cfg.web_panel_allowed_ips)
+        # کلید امضای سشن: اگر در env نبود، یک‌بار می‌سازیم و ماندگار می‌کنیم تا
+        # سشن‌ها با هر ری‌استارت باطل نشوند.
+        secret = self.cfg.web_panel_secret or self.db.get_setting(S_WEB_PANEL_SECRET, "")
+        if not secret:
+            secret = secrets.token_hex(32)
+        self.db.seed_setting(S_WEB_PANEL_SECRET, secret)
 
     @property
     def server_ip(self) -> str:
@@ -289,11 +316,87 @@ class Service:
 
     def enabled_pay_methods(self) -> list[str]:
         methods: list[str] = []
+        if self.hooshpay_enabled:
+            methods.append("hooshpay")
         if self.crypto_enabled:
             methods.append("crypto")
         if self.nowpayments_enabled:
             methods.append("nowpayments")
         return methods
+
+    # --- درگاه ریالی HooshPay ---
+    @property
+    def hooshpay_api_key(self) -> str:
+        return (self.db.get_setting(S_HOOSHPAY_API_KEY, self.cfg.hooshpay_api_key) or "").strip()
+
+    @property
+    def hooshpay_api_secret(self) -> str:
+        return (self.db.get_setting(S_HOOSHPAY_API_SECRET, self.cfg.hooshpay_api_secret) or "").strip()
+
+    @property
+    def hooshpay_base_url(self) -> str:
+        return (self.db.get_setting(S_HOOSHPAY_BASE_URL, self.cfg.hooshpay_base_url) or "").strip()
+
+    @property
+    def hooshpay_enabled(self) -> bool:
+        """درگاه ریالی فقط وقتی فعال است که روشن باشد و کلید API داشته باشد."""
+        return self.feature_enabled(S_HOOSHPAY_ENABLED, default=False) and bool(self.hooshpay_api_key)
+
+    def _hooshpay_client(self):
+        from .hooshpay import HooshPayClient
+        return HooshPayClient(
+            self.hooshpay_api_key, self.hooshpay_api_secret,
+            base_url=self.hooshpay_base_url or "https://hooshpay.xyz",
+            fee_mode=self.cfg.hooshpay_fee_mode,
+        )
+
+    def _payment_toman(self, row) -> int:
+        """مبلغ یک فاکتور را به تومان برمی‌گرداند (برای درگاه ریالی).
+
+        - شارژ کیف پول: amount خودش تومان است.
+        - سفارش محصول (دلاری): usd × نرخ تومان.
+        """
+        if row["purpose"] == "wallet_topup":
+            return int(round(float(row["amount"])))
+        usd = self._payment_usd(row)
+        return int(round(usd * self.toman_per_usd))
+
+    async def prepare_hooshpay_payment(self, order_id: str) -> dict[str, Any]:
+        """فاکتور را از طریق درگاه ریالی HooshPay آماده می‌کند و لینک پرداخت می‌دهد."""
+        if not self.hooshpay_enabled:
+            raise ValueError("درگاه ریالی در حال حاضر فعال نیست.")
+        row = self.db.get_payment_by_order(order_id)
+        if not row:
+            raise ValueError("فاکتور پیدا نشد.")
+        toman = self._payment_toman(row)
+        if toman < 1000:
+            raise ValueError("مبلغ فاکتور برای درگاه ریالی خیلی کم است (حداقل ۱۰۰۰ تومان).")
+        client = self._hooshpay_client()
+        desc = f"{row['purpose']} - {self.cfg.brand_full}"
+        try:
+            data = await client.create_invoice(
+                amount_toman=toman,
+                order_id=order_id,
+                callback_url=self.cfg.hooshpay_callback_url(self.server_ip),
+                return_url=self.cfg.hooshpay_return_url(self.server_ip),
+                description=desc,
+            )
+        except Exception:
+            self.db.update_payment(order_id, method="hooshpay", status="failed")
+            raise
+        self.db.update_payment(
+            order_id, method="hooshpay", status="waiting",
+            invoice_id=str(data.get("uid") or ""),
+            pay_amount=float(data.get("payable_amount") or toman),
+            pay_currency="IRT",
+        )
+        return {
+            "order_id": order_id,
+            "payment_url": data.get("payment_url"),
+            "amount_toman": toman,
+            "payable_amount": data.get("payable_amount"),
+            "uid": data.get("uid"),
+        }
 
     @property
     def crypto_wallet_address(self) -> str:
@@ -378,6 +481,29 @@ class Service:
     @property
     def min_topup(self) -> float:
         return self._fsetting(S_MIN_TOPUP, self.cfg.min_topup)
+
+    # --- پنل وب مدیریتی (مقادیر پویا از دیتابیس) ---
+    @property
+    def web_panel_password(self) -> str:
+        return (self.db.get_setting(S_WEB_PANEL_PASSWORD, self.cfg.web_panel_password) or "").strip()
+
+    @property
+    def web_panel_secret(self) -> str:
+        val = self.db.get_setting(S_WEB_PANEL_SECRET, self.cfg.web_panel_secret) or ""
+        return val or self.cfg.web_panel_secret
+
+    @property
+    def web_panel_allowed_ips(self) -> str:
+        return (self.db.get_setting(S_WEB_PANEL_IPS, self.cfg.web_panel_allowed_ips) or "").strip()
+
+    @property
+    def web_panel_enabled(self) -> bool:
+        return self.feature_enabled(S_WEB_PANEL_ENABLED, default=self.cfg.web_panel_enabled)
+
+    @property
+    def web_panel_active(self) -> bool:
+        """پنل وب فقط وقتی باید اجرا شود که فعال باشد و رمز داشته باشد."""
+        return bool(self.web_panel_enabled and self.web_panel_password)
 
     # ------------------------------------------------------------------ #
     #  محصولات دیجیتال (اکانت/اشتراک آماده)

@@ -108,74 +108,124 @@ async def _deliver_digital(
     bot: Any, cfg: Settings, db: Database, service: Any, tg_id: int,
     slug: str, usd: float, method_label: str, *, order_id: str,
 ) -> bool:
-    """یک قلم از انبار محصول دیجیتال را تحویل می‌دهد و به کاربر/ادمین اطلاع می‌دهد.
+    """محصول دیجیتال را بر اساس روش تحویلِ تعیین‌شده به مشتری می‌رساند.
 
-    True یعنی قلم با موفقیت تحویل شد. اگر موجودی تمام باشد، پول کاربر ثبت‌شده باقی
-    می‌ماند (پرداخت گم نمی‌شود) و به ادمین هشدار داده می‌شود تا دستی تحویل دهد.
+    سه روش:
+      • link    → یک لینک فعال‌سازی از انبار تحویل می‌شود (مثل عضویت در فمیلی).
+      • account → یک اکانت آماده (ایمیل/پسورد/۲FA) از انبار تحویل می‌شود.
+      • manual  → از مشتری ایمیل/پسورد گرفته می‌شود و ادمین دستی انجام می‌دهد.
+
+    خروجی True یعنی سفارش «پذیرفته و در جریان تحویل» است (برای manual)، یا تحویل
+    از انبار موفق بود. اگر انبار خالی/محصول ناموجود باشد False برمی‌گردد و پول
+    ثبت‌شده باقی می‌ماند تا ادمین دستی رسیدگی کند.
     """
-    result = service.deliver_digital(slug, tg_id, order_id)
-    if result is None:
-        # محصول دیگر وجود ندارد (مثلاً حذف شده) — هشدار به ادمین.
+    product = db.get_digital_product_by_slug(slug)
+    if product is None:
         logger.warning("محصول دیجیتال %s برای تحویل پیدا نشد (order=%s)", slug, order_id)
-        try:
-            await bot.send_message(
-                cfg.admin_id,
-                f"⚠️ پرداخت <code>{escape(order_id)}</code> برای محصول دیجیتال "
-                f"<code>{escape(slug)}</code> تأیید شد ولی محصول پیدا نشد. دستی بررسی کنید.",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _safe_send(
+            bot, cfg.admin_id,
+            f"⚠️ پرداخت <code>{escape(order_id)}</code> برای محصول دیجیتال "
+            f"<code>{escape(slug)}</code> تأیید شد ولی محصول پیدا نشد. دستی بررسی کنید.",
+        )
         return False
 
-    product = result["product"]
     title = product["title"]
+    dtype = digital.normalize_delivery(product["delivery_type"])
+
+    # --- روش دستی: اطلاعات از مشتری گرفته می‌شود ---
+    if dtype == digital.DELIVERY_MANUAL:
+        db.create_manual_order(order_id, int(product["id"]), slug, tg_id)
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="📝 ارسال ایمیل و رمز اکانت", callback_data=f"dgm:info:{order_id}")
+        ]])
+        await _safe_send(
+            bot, tg_id,
+            "✅ <b>پرداختت با موفقیت انجام شد!</b> 🎉\n\n"
+            f"🧩 محصول: <b>{escape(title)}</b>\n"
+            f"💳 روش پرداخت: {method_label}\n\n"
+            "برای این محصول لازمه اطلاعات اکانت خودت رو بهمون بدی تا سرویس رو روش فعال کنیم. "
+            "روی دکمه‌ی زیر بزن و ایمیل و رمز اکانتت رو بفرست. 👇\n"
+            "به‌محض اینکه کار انجام شد، همین‌جا بهت خبر می‌دیم. 🙌",
+            reply_markup=kb,
+        )
+        await _safe_send(
+            bot, cfg.admin_id,
+            "🆕 <b>سفارش تحویل دستی</b>\n"
+            f"🧩 محصول: <b>{escape(title)}</b> (<code>{escape(slug)}</code>)\n"
+            f"👤 خریدار: <code>{tg_id}</code>\n"
+            f"🧾 سفارش: <code>{escape(order_id)}</code>\n"
+            "⏳ منتظر ارسال اطلاعات اکانت از سمت مشتری هستیم.",
+        )
+        _notify_admin_sale(bot, cfg, tg_id, f"دیجیتال (دستی): {title}", usd, method_label)
+        return True
+
+    # --- روش‌های مبتنی بر انبار (link / account) ---
+    result = service.deliver_digital(slug, tg_id, order_id)
+    if result is None:
+        await _safe_send(
+            bot, cfg.admin_id,
+            f"⚠️ محصول <code>{escape(slug)}</code> پیدا نشد (order {escape(order_id)}).",
+        )
+        return False
 
     if result["out_of_stock"] or result["item"] is None:
-        # موجودی تمام شده — به کاربر اطلاع می‌دهیم که تحویل دستی و به‌زودی انجام می‌شود.
-        try:
-            await bot.send_message(
-                tg_id,
-                "✅ پرداخت شما تأیید شد.\n"
-                f"🧩 محصول: <b>{escape(title)}</b>\n\n"
-                "⏳ موجودی این محصول همین حالا تمام شده، اما نگران نباشید — سفارش شما "
-                "ثبت شده و به‌صورت دستی و در سریع‌ترین زمان ممکن برایتان ارسال می‌شود. "
-                "اگر عجله دارید به پشتیبانی پیام بدهید.",
-            )
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await bot.send_message(
-                cfg.admin_id,
-                "🛑 <b>موجودی تمام شد!</b>\n"
-                f"🧩 محصول: <b>{escape(title)}</b> (<code>{escape(slug)}</code>)\n"
-                f"👤 خریدار: <code>{tg_id}</code>\n"
-                f"🧾 سفارش: <code>{escape(order_id)}</code>\n"
-                f"💵 مبلغ: <b>{usd:g} USDT</b>\n"
-                "لطفاً این محصول را دستی تحویل دهید و انبار را شارژ کنید.",
-            )
-        except Exception:  # noqa: BLE001
-            pass
+        await _safe_send(
+            bot, tg_id,
+            "✅ پرداختت تأیید شد.\n"
+            f"🧩 محصول: <b>{escape(title)}</b>\n\n"
+            "⏳ موجودی این محصول همین الان تموم شد، ولی نگران نباش — سفارشت ثبت شده و "
+            "در سریع‌ترین زمان ممکن به‌صورت دستی برات ارسال می‌شه. اگه عجله داری به پشتیبانی پیام بده. 🙏",
+        )
+        await _safe_send(
+            bot, cfg.admin_id,
+            "🛑 <b>موجودی تمام شد!</b>\n"
+            f"🧩 محصول: <b>{escape(title)}</b> (<code>{escape(slug)}</code>)\n"
+            f"👤 خریدار: <code>{tg_id}</code>\n"
+            f"🧾 سفارش: <code>{escape(order_id)}</code>\n"
+            f"💵 مبلغ: <b>{usd:g} $</b>\n"
+            "لطفاً دستی تحویل بده و انبار رو شارژ کن.",
+        )
         return False
 
     payload = result["item"]["payload"]
     duration = int(product["duration_days"] or 0)
     duration_line = f"⏳ مدت اعتبار: <b>{duration} روز</b>\n" if duration else ""
-    try:
-        await bot.send_message(
-            tg_id,
-            "✅ <b>خرید شما با موفقیت انجام شد</b>\n\n"
-            f"🧩 محصول: <b>{escape(title)}</b>\n"
-            f"{duration_line}"
-            f"💳 روش پرداخت: {method_label}\n\n"
-            "🔐 <b>اطلاعات تحویل شما:</b>\n"
-            f"<code>{escape(payload)}</code>\n\n"
-            "لطفاً این اطلاعات را جای امنی ذخیره کنید. اگر در فعال‌سازی سؤالی داشتید، "
-            "به پشتیبانی پیام بدهید؛ کنارتان هستیم. 🌟",
+
+    if dtype == digital.DELIVERY_LINK:
+        body = (
+            "🔗 <b>لینک فعال‌سازی شما:</b>\n"
+            f"{escape(payload)}\n\n"
+            "این لینک رو باز کن و روی گزینه‌ی <b>«پیوستن / فعال‌سازی»</b> بزن. "
+            "اشتراک روی همون اکانت خودت فعال می‌شه. ✅"
         )
-    except Exception:  # noqa: BLE001
-        logger.warning("ارسال محصول دیجیتال به کاربر %s ناموفق بود", tg_id)
+    else:  # account
+        body = (
+            "🔐 <b>اطلاعات اکانت شما:</b>\n"
+            f"{digital.format_account_payload(payload)}\n\n"
+            "این اطلاعات رو جای امنی ذخیره کن. توصیه می‌کنیم بعد از ورود، رمز رو عوض نکن "
+            "تا دسترسی قطع نشه."
+        )
+
+    await _safe_send(
+        bot, tg_id,
+        "✅ <b>خریدت با موفقیت انجام شد!</b> 🎉\n\n"
+        f"🧩 محصول: <b>{escape(title)}</b>\n"
+        f"{duration_line}"
+        f"💳 روش پرداخت: {method_label}\n\n"
+        f"{body}\n\n"
+        "اگه جایی گیر کردی یا سؤالی داشتی، به پشتیبانی پیام بده؛ کنارتیم. 🌟",
+    )
     _notify_admin_sale(bot, cfg, tg_id, f"دیجیتال: {title}", usd, method_label)
     return True
+
+
+async def _safe_send(bot: Any, chat_id: int, text: str, **kwargs: Any) -> None:
+    """ارسال پیام با نادیده‌گرفتن خطا (مثلاً وقتی کاربر ربات را بلاک کرده)."""
+    try:
+        await bot.send_message(chat_id, text, **kwargs)
+    except Exception:  # noqa: BLE001
+        logger.warning("ارسال پیام به %s ناموفق بود", chat_id)
 
 
 async def deliver_paid_order(

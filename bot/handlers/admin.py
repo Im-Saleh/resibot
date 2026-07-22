@@ -40,6 +40,9 @@ from ..service import (
     S_CRYPTO_AUTOCONFIRM,
     S_CRYPTO_CONFIRMATIONS,
     S_CRYPTO_WALLET,
+    S_HOOSHPAY_API_KEY,
+    S_HOOSHPAY_API_SECRET,
+    S_HOOSHPAY_ENABLED,
     S_MIN_TOPUP,
     S_REFERRAL_PERCENT,
     S_HOST,
@@ -336,38 +339,157 @@ async def adm_backup(call: CallbackQuery, db: Database) -> None:
 # ====================================================================== #
 #  پنل وب مدیریتی
 # ====================================================================== #
-@router.callback_query(F.data == "adm:web")
-async def adm_web(call: CallbackQuery, cfg: Settings) -> None:
-    await call.answer()
+def _web_kb(service: Service):
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    enabled = service.web_panel_enabled
+    toggle = "🔴 غیرفعال کردن پنل وب" if enabled else "🟢 فعال کردن پنل وب"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔑 تنظیم/تغییر رمز پنل وب", callback_data="set:web_password")],
+        [InlineKeyboardButton(text="🌐 IPهای مجاز", callback_data="set:web_ips")],
+        [InlineKeyboardButton(text=toggle, callback_data="webtgl")],
+        [InlineKeyboardButton(text="🧰 DevOps / نگهداری", callback_data="adm:devops")],
+        _panel_row(),
+    ])
+
+
+def _web_status_text(service: Service, cfg: Settings, webpanel) -> str:
     scheme = "https" if (cfg.web_panel_cert_file and cfg.web_panel_key_file) else "http"
-    host = cfg.server_ip or "IP-سرور"
+    host = service.server_ip or cfg.server_ip or "IP-سرور"
     url = f"{scheme}://{host}:{cfg.web_panel_port}/panel"
-    if cfg.web_panel_active:
-        status = "🟢 فعال و در حال اجرا"
-        pass_note = "🔑 رمز عبور: تنظیم شده ✅"
-    elif cfg.web_panel_enabled and not cfg.web_panel_password:
-        status = "🟡 فعال ولی بدون رمز (بالا نمی‌آید)"
-        pass_note = "🔑 رمز عبور: <b>تنظیم نشده</b> — در فایل .env مقدار WEB_PANEL_PASSWORD را بگذارید."
-    else:
+    running = getattr(webpanel, "is_running", False)
+    if running:
+        status = "🟢 در حال اجرا"
+    elif service.web_panel_enabled and not service.web_panel_password:
+        status = "🟡 فعال ولی بدون رمز (رمز بگذارید تا بالا بیاید)"
+    elif not service.web_panel_enabled:
         status = "🔴 غیرفعال"
-        pass_note = "برای فعال‌سازی WEB_PANEL_ENABLED=1 و WEB_PANEL_PASSWORD را در .env تنظیم کنید."
-    ip_note = (
-        f"🌐 IPهای مجاز: <code>{escape(cfg.web_panel_allowed_ips)}</code>"
-        if cfg.web_panel_allowed_ips else "🌐 IPهای مجاز: همه (توصیه: محدود کنید)"
-    )
-    await call.message.answer(
+    else:
+        status = "🟡 آماده (پس از تنظیم رمز بالا می‌آید)"
+    pass_note = "🔑 رمز عبور: تنظیم شده ✅" if service.web_panel_password else "🔑 رمز عبور: <b>تنظیم نشده</b>"
+    ips = service.web_panel_allowed_ips
+    ip_note = f"🌐 IPهای مجاز: <code>{escape(ips)}</code>" if ips else "🌐 IPهای مجاز: همه (توصیه: محدود کنید)"
+    return (
         "🌐 <b>پنل وب مدیریتی</b>\n\n"
         f"وضعیت: {status}\n"
         f"🔗 آدرس: <code>{escape(url)}</code>\n"
         f"{pass_note}\n"
         f"{ip_note}\n\n"
-        "از این پنل می‌توانید محصولات دیجیتال را بسازید/ویرایش کنید، قیمت‌ها را تغییر "
-        "دهید، آمار را ببینید و لاگ امنیتی را بررسی کنید.\n\n"
-        "🛡 <b>امنیت:</b> ورود با رمز، سشن امضاشده، محافظت CSRF، قفل ضدحمله‌ی brute-force، "
-        "هدرهای امنیتی و لاگ کامل رخدادها فعال است.\n"
-        "💡 توصیه: پورت پنل را پشت HTTPS و فایروال قرار دهید و لیست IP مجاز را ست کنید.",
+        "از این پنل می‌توانید محصولات دیجیتال، قیمت‌ها، درگاه‌ها، آمار و کارهای DevOps را مدیریت کنید.\n\n"
+        "🛡 <b>امنیت:</b> ورود با رمز هش‌شده، سشن امضاشده، CSRF، قفل ضد brute-force، "
+        "هدرهای امنیتی و لاگ کامل.\n"
+        "💡 می‌توانید همین‌جا رمز را تنظیم کنید تا پنل بلافاصله بالا بیاید."
+    )
+
+
+@router.callback_query(F.data == "adm:web")
+async def adm_web(call: CallbackQuery, cfg: Settings, service: Service, webpanel=None) -> None:
+    await call.answer()
+    await call.message.answer(_web_status_text(service, cfg, webpanel), reply_markup=_web_kb(service))
+
+
+@router.callback_query(F.data == "webtgl")
+async def adm_web_toggle(call: CallbackQuery, service: Service, cfg: Settings, webpanel=None) -> None:
+    from ..service import S_WEB_PANEL_ENABLED
+    new_val = service.toggle_feature(S_WEB_PANEL_ENABLED)
+    db_note = ""
+    if new_val and webpanel is not None:
+        started = await webpanel.ensure_started()
+        db_note = " و بالا آمد ✅" if started else " (برای بالا آمدن رمز لازم است)"
+    await call.answer(f"پنل وب {'فعال شد' if new_val else 'غیرفعال شد'}{db_note}", show_alert=True)
+    try:
+        await call.message.edit_text(_web_status_text(service, cfg, webpanel), reply_markup=_web_kb(service))
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.message(AdminStates.set_web_password)
+async def s_web_password(message: Message, state: FSMContext, service: Service, cfg: Settings, webpanel=None) -> None:
+    pw = (message.text or "").strip()
+    if len(pw) < 6:
+        await message.answer("⛔️ رمز باید حداقل ۶ نویسه باشد. یک رمز قوی‌تر بفرستید:")
+        return
+    # رمز را هش‌شده ذخیره می‌کنیم تا متن خام در دیتابیس نماند.
+    from ..webpanel.security import hash_password
+    from ..service import S_WEB_PANEL_PASSWORD, S_WEB_PANEL_ENABLED
+    service.set_setting(S_WEB_PANEL_PASSWORD, hash_password(pw))
+    service.set_setting(S_WEB_PANEL_ENABLED, "1")
+    service.db.audit("web_password_set", actor=str(message.from_user.id))
+    await state.clear()
+    # حذف پیام حاوی رمز برای امنیت
+    try:
+        await message.delete()
+    except Exception:  # noqa: BLE001
+        pass
+    note = "✅ رمز پنل وب تنظیم شد."
+    if webpanel is not None:
+        started = await webpanel.ensure_started()
+        note += " پنل وب بالا آمد و آماده است. 🟢" if started else ""
+    scheme = "https" if (cfg.web_panel_cert_file and cfg.web_panel_key_file) else "http"
+    host = service.server_ip or "IP-سرور"
+    await message.answer(
+        f"{note}\n🔗 آدرس: <code>{scheme}://{host}:{cfg.web_panel_port}/panel</code>\n"
+        "برای امنیت، پیام حاوی رمز حذف شد.",
         reply_markup=back_to_panel_kb(),
     )
+
+
+@router.message(AdminStates.set_web_ips)
+async def s_web_ips(message: Message, state: FSMContext, service: Service) -> None:
+    from ..service import S_WEB_PANEL_IPS
+    ips = (message.text or "").strip()
+    if ips in ("-", "0", "همه", "all"):
+        ips = ""
+    service.set_setting(S_WEB_PANEL_IPS, ips[:253])
+    await state.clear()
+    await message.answer(
+        "✅ لیست IPهای مجاز به‌روزرسانی شد."
+        + (f"\nمجاز: <code>{escape(ips)}</code>" if ips else "\nهمه‌ی IPها مجازند.")
+    )
+
+
+# ====================================================================== #
+#  DevOps و نگهداری
+# ====================================================================== #
+def _devops_kb():
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="💾 تهیه‌ی پشتیبان دیتابیس", callback_data="adm:backup")],
+        [InlineKeyboardButton(text="🔧 روشن/خاموش حالت تعمیر", callback_data="adm:maint")],
+        [InlineKeyboardButton(text="🧹 هرس لاگ‌های قدیمی", callback_data="adm:pruneaudit")],
+        [InlineKeyboardButton(text="🛡 لاگ امنیتی", callback_data="adm:audit")],
+        [InlineKeyboardButton(text="📊 وضعیت سرویس‌ها", callback_data="menu:status")],
+        _panel_row(),
+    ])
+
+
+@router.callback_query(F.data == "adm:devops")
+async def adm_devops(call: CallbackQuery, db: Database, service: Service) -> None:
+    await call.answer()
+    import sys as _sys
+    maint = db.get_setting("maintenance_mode", "0") == "1"
+    try:
+        import os
+        db_size = f"{os.path.getsize(str(db.path))/1024/1024:.2f} MB"
+    except OSError:
+        db_size = "—"
+    await call.message.answer(
+        "🧰 <b>DevOps و نگهداری</b>\n\n"
+        f"👥 کاربران: <b>{db.count_users()}</b>\n"
+        f"🧾 سرویس فعال: <b>{len(db.list_all_configs())}</b>\n"
+        f"🙋 سفارش دستی باز: <b>{db.count_manual_pending()}</b>\n"
+        f"💽 حجم دیتابیس: <b>{db_size}</b>\n"
+        f"🔧 حالت تعمیر: <b>{'روشن' if maint else 'خاموش'}</b>\n"
+        f"🐍 پایتون: <b>{_sys.version.split()[0]}</b>\n\n"
+        "این کارها از پنل وب هم در دسترس‌اند. یکی را انتخاب کنید:",
+        reply_markup=_devops_kb(),
+    )
+
+
+@router.callback_query(F.data == "adm:pruneaudit")
+async def adm_prune_audit(call: CallbackQuery, db: Database) -> None:
+    db.prune_audit(keep=2000)
+    db.audit("audit_prune", actor=str(call.from_user.id))
+    await call.answer("✅ لاگ‌های قدیمی هرس شدند.", show_alert=True)
 
 
 # ====================================================================== #
@@ -696,14 +818,20 @@ def _pay_kb(service: Service):
     return payments_admin_menu(
         crypto_on=service.feature_enabled(S_PAY_CRYPTO_ENABLED),
         nowpayments_on=service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED),
+        hooshpay_on=service.feature_enabled(S_HOOSHPAY_ENABLED, default=False),
     )
 
 
 def _pay_text(service: Service) -> str:
     wallet = service.crypto_wallet_address or "—"
     wallet_ok = "✅ معتبر" if is_valid_address(wallet) else "⛔️ نامعتبر"
+    hp_key = service.hooshpay_api_key
+    hp_key_txt = ("••••" + hp_key[-4:]) if hp_key else "تنظیم نشده"
+    hp_secret_txt = "تنظیم شده ✅" if service.hooshpay_api_secret else "تنظیم نشده"
     return (
         "💳 <b>روش‌های پرداخت</b>\n\n"
+        f"• درگاه ریالی HooshPay: {'فعال ✅' if service.hooshpay_enabled else 'غیرفعال ❌'}\n"
+        f"   └ کلید API: <code>{escape(hp_key_txt)}</code> | Secret: {hp_secret_txt}\n"
         f"• پرداخت مستقیم USDT: {'فعال ✅' if service.feature_enabled(S_PAY_CRYPTO_ENABLED) else 'غیرفعال ❌'}\n"
         f"• درگاه NowPayments: {'فعال ✅' if service.feature_enabled(S_PAY_NOWPAYMENTS_ENABLED) else 'غیرفعال ❌'}\n\n"
         "💠 <b>پرداخت مستقیم (USDT روی BEP20)</b>\n"
@@ -729,6 +857,7 @@ async def adm_pay(call: CallbackQuery, service: Service) -> None:
 _PAY_TOGGLE_KEYS = {
     "crypto": (S_PAY_CRYPTO_ENABLED, "پرداخت مستقیم USDT"),
     "nowpayments": (S_PAY_NOWPAYMENTS_ENABLED, "درگاه NowPayments"),
+    "hooshpay": (S_HOOSHPAY_ENABLED, "درگاه ریالی HooshPay"),
 }
 
 
@@ -958,11 +1087,15 @@ _SETTING_PROMPTS = {
     "crypto_wallet": (AdminStates.set_crypto_wallet, "آدرس ولت مقصد USDT (شبکه BEP20) را بفرستید — فرمت 0x و ۴۰ رقم هگز:"),
     "bsc_rpc": (AdminStates.set_bsc_rpc, "آدرس RPC شبکه BSC را بفرستید (مثل https://bsc-dataseed.binance.org):"),
     "crypto_conf": (AdminStates.set_crypto_conf, "تعداد تأیید لازم قبل از تحویل را بفرستید (مثلاً 12):"),
+    "hooshpay_key": (AdminStates.set_hooshpay_key, "کلید API درگاه ریالی (X-API-KEY) را بفرستید (مثل hp_live_...):"),
+    "hooshpay_secret": (AdminStates.set_hooshpay_secret, "کلید Secret درگاه ریالی را بفرستید (برای تأیید امضای کال‌بک):"),
     "v2ray_inbound": (AdminStates.set_v2ray_inbound, "شناسه عددی اینباند V2Ray در پنل را بفرستید (مثلاً 6):"),
     "v2ray_plan_price": (AdminStates.set_v2ray_plan_price, "قیمت پلن V2Ray عادی (USDT) را بفرستید:"),
     "v2ray_plan_reseller": (AdminStates.set_v2ray_plan_reseller, "قیمت پلن V2Ray همکار (USDT) را بفرستید:"),
     "referral_percent": (AdminStates.set_referral_percent, "درصد پاداش رفرال را بفرستید (عدد بین ۰ تا ۱۰۰):"),
     "min_topup": (AdminStates.set_min_topup, "حداقل مبلغ شارژ کیف پول را بفرستید (مثلاً 100000):"),
+    "web_password": (AdminStates.set_web_password, "🔑 رمز جدید پنل وب را بفرستید (حداقل ۶ نویسه). بعد از تنظیم، پیام شما حذف می‌شود و پنل وب بالا می‌آید:"),
+    "web_ips": (AdminStates.set_web_ips, "🌐 IPهای مجاز پنل وب را با کاما بفرستید (برای «همه» یک خط تیره «-» بفرستید):"),
 }
 
 
@@ -1116,6 +1249,31 @@ async def s_bsc_rpc(message: Message, state: FSMContext, service: Service) -> No
 @router.message(AdminStates.set_crypto_conf)
 async def s_crypto_conf(message: Message, state: FSMContext, service: Service) -> None:
     await _save_int(message, state, service, S_CRYPTO_CONFIRMATIONS, "تعداد تأیید لازم")
+
+
+@router.message(AdminStates.set_hooshpay_key)
+async def s_hooshpay_key(message: Message, state: FSMContext, service: Service) -> None:
+    key = (message.text or "").strip()
+    if len(key) < 6:
+        await message.answer("⛔️ کلید نامعتبر است. دوباره بفرستید:")
+        return
+    service.set_setting(S_HOOSHPAY_API_KEY, key[:200])
+    await state.clear()
+    await message.answer(
+        "✅ کلید API درگاه ریالی ذخیره شد.\n"
+        "برای فعال‌سازی، از منوی «روش‌های پرداخت» درگاه ریالی را روشن کنید (Secret را هم ست کنید)."
+    )
+
+
+@router.message(AdminStates.set_hooshpay_secret)
+async def s_hooshpay_secret(message: Message, state: FSMContext, service: Service) -> None:
+    secret = (message.text or "").strip()
+    if len(secret) < 6:
+        await message.answer("⛔️ Secret نامعتبر است. دوباره بفرستید:")
+        return
+    service.set_setting(S_HOOSHPAY_API_SECRET, secret[:200])
+    await state.clear()
+    await message.answer("✅ کلید Secret درگاه ریالی ذخیره شد (برای اعتبارسنجی کال‌بک استفاده می‌شود).")
 
 
 @router.message(AdminStates.set_v2ray_inbound)

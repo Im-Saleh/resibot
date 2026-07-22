@@ -21,7 +21,7 @@ from .middlewares import ContextMiddleware, ThrottleMiddleware
 from .nowpayments import NowPaymentsClient
 from .panel import PanelClient
 from .service import Service
-from .webpanel import start_web_panel
+from .webpanel import WebPanelManager
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,24 +79,27 @@ async def run() -> None:
 
     register_handlers(dp, settings, db)
 
+    # سرور IPN لازم است اگر NowPayments یا درگاه ریالی HooshPay فعال باشد
+    # (کال‌بک هر دو روی همین سرور دریافت می‌شود).
     ipn_runner = None
-    if settings.nowpayments_enabled:
+    if settings.nowpayments_enabled or service.hooshpay_enabled:
         try:
             ipn_runner = await start_ipn_server(settings, db, bot, service)
         except Exception:  # noqa: BLE001
-            logger.exception("راه‌اندازی سرور IPN ناموفق بود؛ شارژ خودکار غیرفعال می‌ماند")
+            logger.exception("راه‌اندازی سرور IPN ناموفق بود؛ کال‌بک پرداخت غیرفعال می‌ماند")
     else:
-        logger.info("NowPayments پیکربندی نشده؛ شارژ کیف پول از طریق درگاه غیرفعال است")
+        logger.info("هیچ درگاه کال‌بک‌محوری فعال نیست؛ سرور IPN بالا نمی‌آید")
 
-    # پنل وب مدیریتی (aiohttp) — فقط اگر فعال و دارای پسورد باشد.
-    web_runner = None
-    if settings.web_panel_active:
-        try:
-            web_runner = await start_web_panel(settings, db, service)
-        except Exception:  # noqa: BLE001
-            logger.exception("راه‌اندازی پنل وب ناموفق بود؛ ربات بدون پنل وب ادامه می‌دهد")
-    elif settings.web_panel_enabled and not settings.web_panel_password:
-        logger.warning("پنل وب فعال است اما WEB_PANEL_PASSWORD تنظیم نشده؛ پنل وب بالا نمی‌آید.")
+    # پنل وب مدیریتی (aiohttp) — همیشه یک مدیر می‌سازیم تا ادمین بتواند بعداً از
+    # داخل ربات رمز بگذارد و پنل را بالا بیاورد (استارت پویا).
+    web_panel = WebPanelManager(settings, db, service)
+    dp["webpanel"] = web_panel
+    try:
+        started = await web_panel.ensure_started()
+        if not started and settings.web_panel_enabled:
+            logger.warning("پنل وب رمز ندارد؛ از داخل ربات (پنل وب مدیریتی) رمز بگذارید تا بالا بیاید.")
+    except Exception:  # noqa: BLE001
+        logger.exception("راه‌اندازی پنل وب ناموفق بود؛ ربات بدون پنل وب ادامه می‌دهد")
 
     # رصدگر پرداخت مستقیم کریپتو (USDT BEP20) — فقط رصد، بدون کلید خصوصی.
     async def _settle_crypto(order_id: str, tx_hash: str) -> None:
@@ -141,8 +144,7 @@ async def run() -> None:
                 pass
         if ipn_runner is not None:
             await ipn_runner.cleanup()
-        if web_runner is not None:
-            await web_runner.cleanup()
+        await web_panel.cleanup()
         await panel.close()
         db.close()
         await bot.session.close()

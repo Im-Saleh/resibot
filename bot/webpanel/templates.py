@@ -131,6 +131,8 @@ _NAV = [
     ("dashboard", "🏠", "داشبورد", "/panel"),
     ("products", "🤖", "محصولات دیجیتال", "/panel/products"),
     ("prices", "💵", "قیمت‌ها", "/panel/prices"),
+    ("gateways", "💳", "درگاه‌های پرداخت", "/panel/gateways"),
+    ("system", "🧰", "DevOps و سیستم", "/panel/system"),
     ("audit", "🛡", "لاگ امنیتی", "/panel/audit"),
 ]
 
@@ -390,3 +392,90 @@ def audit_page(rows: list) -> str:
         "</table></div>"
     )
     return render_page("لاگ امنیتی", body, active="audit")
+
+
+def gateways_page(*, csrf: str, values: dict, flash: str = "") -> str:
+    """صفحه‌ی درگاه‌های پرداخت: فعال/غیرفعال + کلیدهای درگاه ریالی HooshPay."""
+    flash_html = f"<div class='flash ok'>{escape(flash)}</div>" if flash else ""
+
+    def toggle_badge(on: bool) -> str:
+        return "<span class='badge ok'>فعال</span>" if on else "<span class='badge off'>غیرفعال</span>"
+
+    def cb(name: str, on: bool) -> str:
+        checked = "checked" if on else ""
+        return (
+            f"<label style='display:flex;gap:10px;align-items:center;cursor:pointer'>"
+            f"<input type='checkbox' name='{name}' style='width:auto;margin:0' {checked}> فعال باشد</label>"
+        )
+
+    body = (
+        "<div class='top'><h1>💳 درگاه‌های پرداخت</h1></div>"
+        + flash_html
+        + "<div class='panel'><h2>💳 درگاه ریالی HooshPay "
+        + toggle_badge(values.get("hp_on", False)) + "</h2>"
+        + "<p class='hint'>کارت‌به‌کارت با تأیید آنی. کلید و Secret را از پنل HooshPay بگیرید.</p>"
+        + f"<form method='post' action='/panel/gateways'>"
+        + f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
+        + cb("hp_enabled", values.get("hp_on", False))
+        + f"<label>کلید API (X-API-KEY)</label><input name='hp_key' value='{escape(values.get('hp_key',''))}' placeholder='hp_live_...'>"
+        + f"<label>کلید Secret (برای تأیید امضای کال‌بک)</label><input name='hp_secret' value='{escape(values.get('hp_secret',''))}' placeholder='بدون تغییر خالی بگذارید'>"
+        + "<div class='hint'>Secret فقط هنگام تغییر لازم است؛ اگر خالی بگذارید مقدار فعلی حفظ می‌شود.</div>"
+        + "<div style='margin-top:8px'><button class='btn primary'>💾 ذخیره درگاه ریالی</button></div>"
+        + "</form></div>"
+        + "<div class='panel'><h2>💠 درگاه‌های ارزی</h2>"
+        + f"<form method='post' action='/panel/gateways'>"
+        + f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
+        + "<input type='hidden' name='section' value='crypto'>"
+        + f"<div style='margin-bottom:12px'>پرداخت مستقیم USDT (BEP20): {toggle_badge(values.get('crypto_on', False))}</div>"
+        + cb("crypto_enabled", values.get("crypto_on", False))
+        + f"<div style='margin:12px 0'>درگاه NowPayments: {toggle_badge(values.get('now_on', False))}</div>"
+        + cb("now_enabled", values.get("now_on", False))
+        + "<div style='margin-top:8px'><button class='btn primary'>💾 ذخیره درگاه‌های ارزی</button></div>"
+        + "</form></div>"
+    )
+    return render_page("درگاه‌ها", body, active="gateways")
+
+
+def system_page(*, csrf: str, stats: dict, flash: str = "") -> str:
+    """صفحه‌ی DevOps/سیستم: بکاپ، حالت تعمیر، هرس لاگ، آمار."""
+    flash_html = f"<div class='flash ok'>{escape(flash)}</div>" if flash else ""
+    maint = stats.get("maintenance", False)
+    maint_badge = (
+        "<span class='badge warn'>روشن</span>" if maint else "<span class='badge ok'>خاموش</span>"
+    )
+    cards = "".join([
+        _stat("حجم دیتابیس", stats.get("db_size", "—")),
+        _stat("کاربران", stats.get("users", 0)),
+        _stat("سرویس فعال", stats.get("configs", 0)),
+        _stat("سفارش دستی باز", stats.get("manual_pending", 0)),
+        _stat("لاگ امنیتی", stats.get("audit_rows", 0)),
+        _stat("نسخه پایتون", stats.get("python", "—")),
+    ])
+
+    def act(action: str, label: str, cls: str = "primary", confirm: str = "") -> str:
+        onsub = f" onsubmit=\"return confirm('{confirm}')\"" if confirm else ""
+        return (
+            f"<form method='post' action='/panel/system' style='display:inline-block;margin:4px'{onsub}>"
+            f"<input type='hidden' name='csrf' value='{escape(csrf)}'>"
+            f"<input type='hidden' name='action' value='{action}'>"
+            f"<button class='btn {cls}'>{escape(label)}</button></form>"
+        )
+
+    body = (
+        "<div class='top'><h1>🧰 DevOps و سیستم</h1></div>"
+        + flash_html
+        + f"<div class='grid'>{cards}</div>"
+        + "<div class='panel'><h2>🛠 عملیات نگهداری</h2>"
+        + f"<p>حالت تعمیر: {maint_badge} — در این حالت فقط ادمین به ربات دسترسی دارد.</p>"
+        + "<div class='row'>"
+        + act("backup", "💾 تهیه‌ی پشتیبان دیتابیس")
+        + act("maint_on" if not maint else "maint_off",
+              "🔧 روشن‌کردن حالت تعمیر" if not maint else "🟢 خاموش‌کردن حالت تعمیر",
+              cls="danger" if not maint else "primary")
+        + act("prune_audit", "🧹 هرس لاگ‌های قدیمی", cls="", confirm="لاگ‌های قدیمی هرس شوند؟")
+        + "</div>"
+        + "<p class='hint' style='margin-top:14px'>پشتیبان‌ها در پوشه‌ی backups/ روی سرور ذخیره می‌شوند. "
+        + f"آخرین پشتیبان: {escape(str(stats.get('last_backup','—')))}</p>"
+        + "</div>"
+    )
+    return render_page("DevOps و سیستم", body, active="system")

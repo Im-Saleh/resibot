@@ -8,4 +8,4 @@
   - templates.py : صفحات HTML با ظاهر شیشه‌ای (glassmorphism)، بدون وابستگی بیرونی
   - app.py       : اپلیکیشن aiohttp، مسیرها و میدلورهای امنیتی
 """
-from .app import start_web_panel, make_web_app  # noqa: F401
+from .app import WebPanelManager, start_web_panel, make_web_app  # noqa: F401

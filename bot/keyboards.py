@@ -80,6 +80,10 @@ def back_to_panel_kb() -> InlineKeyboardMarkup:
 # ---------------------------------------------------------------------- #
 def pay_methods_keyboard(order_id: str, methods: list[str]) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
+    if "hooshpay" in methods:
+        rows.append([InlineKeyboardButton(
+            text="💳 پرداخت ریالی (کارت‌به‌کارت)", callback_data=f"pm:hoosh:{order_id}"
+        )])
     if "crypto" in methods:
         rows.append([InlineKeyboardButton(
             text="💠 پرداخت مستقیم USDT (BEP20)", callback_data=f"pm:crypto:{order_id}"
@@ -166,6 +170,10 @@ def digital_pay_kb(order_id: str, methods: list[str], *, wallet: bool = False) -
     if wallet:
         rows.append([InlineKeyboardButton(
             text="💼 پرداخت از کیف پول", callback_data=f"dg:wallet:{order_id}"
+        )])
+    if "hooshpay" in methods:
+        rows.append([InlineKeyboardButton(
+            text="💳 پرداخت ریالی (کارت‌به‌کارت)", callback_data=f"pm:hoosh:{order_id}"
         )])
     if "crypto" in methods:
         rows.append([InlineKeyboardButton(
@@ -547,13 +555,20 @@ def user_actions_kb(tg_id: int, *, banned: bool) -> InlineKeyboardMarkup:
     )
 
 
-def payments_admin_menu(*, crypto_on: bool, nowpayments_on: bool) -> InlineKeyboardMarkup:
+def payments_admin_menu(*, crypto_on: bool, nowpayments_on: bool, hooshpay_on: bool = False) -> InlineKeyboardMarkup:
     """منوی مدیریت روش‌های پرداخت + تنظیمات کریپتو و پلن V2Ray."""
     def mark(on: bool) -> str:
         return "✅" if on else "❌"
 
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [InlineKeyboardButton(
+                text=f"{mark(hooshpay_on)} درگاه ریالی HooshPay", callback_data="paytgl:hooshpay"
+            )],
+            [
+                InlineKeyboardButton(text="🔑 کلید API ریالی", callback_data="set:hooshpay_key"),
+                InlineKeyboardButton(text="🔐 Secret ریالی", callback_data="set:hooshpay_secret"),
+            ],
             [InlineKeyboardButton(
                 text=f"{mark(crypto_on)} پرداخت مستقیم USDT (BEP20)", callback_data="paytgl:crypto"
             )],
