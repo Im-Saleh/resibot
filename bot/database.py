@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -84,6 +84,8 @@ class Database:
                 self._migrate_v7()
             if current < 8:
                 self._migrate_v8()
+            if current < 9:
+                self._migrate_v9()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -526,6 +528,152 @@ class Database:
             "(SELECT id FROM audit_log ORDER BY id DESC LIMIT ?)",
             (int(keep),),
         )
+
+    def _migrate_v9(self) -> None:
+        """سفارش‌های تحویل دستی محصول دیجیتال (روش «دریافت اطلاعات از مشتری»).
+
+        وقتی روش تحویل یک محصول «manual» باشد، پس از پرداخت، اطلاعاتِ اکانتِ مشتری
+        (ایمیل/پسورد) گرفته می‌شود، ادمین کار را انجام می‌دهد و به مشتری خبر می‌دهد.
+        وضعیت‌ها: awaiting_info → pending → done (یا cancelled).
+        """
+        self._conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS manual_orders (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                order_id     TEXT UNIQUE NOT NULL,
+                product_id   INTEGER NOT NULL,
+                slug         TEXT NOT NULL DEFAULT '',
+                buyer_tg_id  INTEGER NOT NULL,
+                credentials  TEXT NOT NULL DEFAULT '',
+                status       TEXT NOT NULL DEFAULT 'awaiting_info',
+                admin_note   TEXT NOT NULL DEFAULT '',
+                created_at   INTEGER NOT NULL,
+                updated_at   INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_manual_status ON manual_orders(status);
+            CREATE INDEX IF NOT EXISTS idx_manual_buyer ON manual_orders(buyer_tg_id);
+            """
+        )
+        self._conn.commit()
+
+    # ------------------------------------------------------------------ #
+    #  سفارش‌های تحویل دستی (manual_orders)
+    # ------------------------------------------------------------------ #
+    def create_manual_order(
+        self, order_id: str, product_id: int, slug: str, buyer_tg_id: int
+    ) -> int:
+        """یک سفارش تحویل دستی می‌سازد (idempotent روی order_id)."""
+        now = int(time.time())
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT id FROM manual_orders WHERE order_id = ?", (order_id,)
+            ).fetchone()
+            if existing is not None:
+                return int(existing["id"])
+            cur = self._conn.execute(
+                "INSERT INTO manual_orders(order_id, product_id, slug, buyer_tg_id, "
+                "status, created_at, updated_at) VALUES(?,?,?,?,'awaiting_info',?,?)",
+                (order_id, int(product_id), slug, int(buyer_tg_id), now, now),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def get_manual_order(self, manual_id: int) -> Optional[sqlite3.Row]:
+        return self.query_one("SELECT * FROM manual_orders WHERE id = ?", (int(manual_id),))
+
+    def get_manual_order_by_order(self, order_id: str) -> Optional[sqlite3.Row]:
+        return self.query_one("SELECT * FROM manual_orders WHERE order_id = ?", (order_id,))
+
+    def set_manual_credentials(self, order_id: str, credentials: str) -> None:
+        self.execute(
+            "UPDATE manual_orders SET credentials = ?, status = 'pending', updated_at = ? "
+            "WHERE order_id = ?",
+            (credentials[:1000], int(time.time()), order_id),
+        )
+
+    def set_manual_status(self, manual_id: int, status: str, *, admin_note: str = "") -> None:
+        self.execute(
+            "UPDATE manual_orders SET status = ?, admin_note = ?, updated_at = ? WHERE id = ?",
+            (status, admin_note[:500], int(time.time()), int(manual_id)),
+        )
+
+    def list_manual_orders(self, *, status: str = "", limit: int = 50) -> list[sqlite3.Row]:
+        if status:
+            return self.query_all(
+                "SELECT * FROM manual_orders WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status, int(limit)),
+            )
+        return self.query_all(
+            "SELECT * FROM manual_orders ORDER BY id DESC LIMIT ?", (int(limit),)
+        )
+
+    def count_manual_pending(self) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS c FROM manual_orders WHERE status IN ('awaiting_info','pending')"
+        )
+        return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------ #
+    #  خلاصه‌ی خرید کاربر (برای پنل مدیریت کاربران)
+    # ------------------------------------------------------------------ #
+    def user_purchase_summary(self, tg_id: int) -> dict[str, Any]:
+        """خلاصه‌ی خریدهای یک کاربر: پرداخت‌های موفق به تفکیک ارز + تعداد سرویس/محصول دیجیتال."""
+        paid_rows = self.query_all(
+            "SELECT currency, COUNT(*) AS cnt, COALESCE(SUM(amount),0) AS total "
+            "FROM payments WHERE tg_id = ? AND credited = 1 GROUP BY currency",
+            (int(tg_id),),
+        )
+        by_currency = [
+            {"currency": r["currency"], "count": int(r["cnt"]), "sum": float(r["total"])}
+            for r in paid_rows
+        ]
+        paid_count = sum(c["count"] for c in by_currency)
+        cfg_row = self.query_one(
+            "SELECT COUNT(*) AS c FROM configs WHERE owner_tg_id = ?", (int(tg_id),)
+        )
+        dig_row = self.query_one(
+            "SELECT COUNT(*) AS c FROM digital_stock WHERE buyer_tg_id = ? AND status = 'sold'",
+            (int(tg_id),),
+        )
+        return {
+            "by_currency": by_currency,
+            "paid_count": paid_count,
+            "configs": int(cfg_row["c"]) if cfg_row else 0,
+            "digital": int(dig_row["c"]) if dig_row else 0,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  ادمین‌های اضافه (multi-admin) — در جدول settings ذخیره می‌شوند
+    # ------------------------------------------------------------------ #
+    _EXTRA_ADMINS_KEY = "extra_admins"
+
+    def list_extra_admins(self) -> list[int]:
+        raw = self.get_setting(self._EXTRA_ADMINS_KEY, "") or ""
+        out: list[int] = []
+        for part in raw.replace(" ", "").split(","):
+            if part.isdigit():
+                out.append(int(part))
+        return out
+
+    def is_extra_admin(self, tg_id: int) -> bool:
+        return int(tg_id) in set(self.list_extra_admins())
+
+    def add_extra_admin(self, tg_id: int) -> bool:
+        """یک ادمین اضافه می‌کند. True اگر جدید بود، False اگر از قبل بود."""
+        ids = self.list_extra_admins()
+        if int(tg_id) in ids:
+            return False
+        ids.append(int(tg_id))
+        self.set_setting(self._EXTRA_ADMINS_KEY, ",".join(str(i) for i in ids))
+        return True
+
+    def remove_extra_admin(self, tg_id: int) -> bool:
+        ids = self.list_extra_admins()
+        if int(tg_id) not in ids:
+            return False
+        ids = [i for i in ids if i != int(tg_id)]
+        self.set_setting(self._EXTRA_ADMINS_KEY, ",".join(str(i) for i in ids))
+        return True
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:

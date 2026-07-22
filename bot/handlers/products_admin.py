@@ -23,7 +23,13 @@ from aiogram.types import (
 )
 
 from ..database import Database
-from ..digital import valid_slug
+from ..digital import (
+    DELIVERY_LABELS,
+    DELIVERY_TYPES,
+    normalize_delivery,
+    uses_stock,
+    valid_slug,
+)
 from ..service import Service
 from ..states import DigitalAdminStates
 
@@ -36,7 +42,7 @@ _EDIT_FIELDS = {
     "title": ("عنوان", "عنوان جدید محصول را بفرستید:", "text"),
     "subtitle": ("زیرعنوان", "زیرعنوان (یک خط کوتاه) را بفرستید:", "text"),
     "description": ("متن فروش", "متن فروش/توضیحات کامل را بفرستید (می‌تواند چند خط و شامل HTML ساده باشد):", "text"),
-    "price": ("قیمت (USD)", "قیمت جدید به دلار را بفرستید (مثلاً 12.5):", "float"),
+    "price": ("قیمت (دلار)", "قیمت جدید به دلار را بفرستید (مثلاً 12.5):", "float"),
     "duration_days": ("مدت اعتبار (روز)", "مدت اعتبار به روز را بفرستید (0 یعنی نامشخص):", "int"),
 }
 
@@ -57,6 +63,9 @@ def _products_list_kb(db: Database) -> InlineKeyboardMarkup:
             callback_data=f"dp:open:{p['id']}",
         )])
     rows.append([InlineKeyboardButton(text="➕ افزودن محصول جدید", callback_data="dp:add")])
+    pending = db.count_manual_pending()
+    manual_label = "🙋 سفارش‌های تحویل دستی" + (f" ({pending})" if pending else "")
+    rows.append([InlineKeyboardButton(text=manual_label, callback_data="adm:manual")])
     rows.append(_panel_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -72,7 +81,10 @@ def _product_actions_kb(product_id: int, *, active: bool) -> InlineKeyboardMarku
             InlineKeyboardButton(text="📝 متن فروش", callback_data=f"dp:edit:{product_id}:description"),
             InlineKeyboardButton(text="💵 قیمت", callback_data=f"dp:edit:{product_id}:price"),
         ],
-        [InlineKeyboardButton(text="⏳ مدت اعتبار", callback_data=f"dp:edit:{product_id}:duration_days")],
+        [
+            InlineKeyboardButton(text="⏳ مدت اعتبار", callback_data=f"dp:edit:{product_id}:duration_days"),
+            InlineKeyboardButton(text="🚚 روش تحویل", callback_data=f"dp:delivery:{product_id}"),
+        ],
         [
             InlineKeyboardButton(text="➕ افزودن موجودی", callback_data=f"dp:stock:{product_id}"),
             InlineKeyboardButton(text="📦 مشاهده انبار", callback_data=f"dp:stockview:{product_id}"),
@@ -89,21 +101,26 @@ def _product_actions_kb(product_id: int, *, active: bool) -> InlineKeyboardMarku
 
 def _product_detail(db: Database, service: Service, product) -> str:
     pid = int(product["id"])
-    avail = db.count_available_stock(pid)
-    sold = db.count_digital_sales(pid)
     price_usd = float(product["price"])
-    return "\n".join([
+    dtype = normalize_delivery(product["delivery_type"])
+    lines = [
         f"🧩 <b>{escape(product['title'])}</b>",
         f"🔖 شناسه: <code>{escape(product['slug'])}</code>",
         f"📄 زیرعنوان: {escape(product['subtitle'] or '—')}",
-        f"💵 قیمت: <b>{price_usd:g} USDT</b> (≈ {service.digital_price_toman(price_usd):g} {service.currency})",
+        f"💵 قیمت: <b>{price_usd:g} دلار</b> 💵",
         f"⏳ مدت اعتبار: <b>{int(product['duration_days'] or 0)} روز</b>",
+        f"🚚 روش تحویل: <b>{DELIVERY_LABELS.get(dtype, dtype)}</b>",
         f"⚙️ وضعیت: {'🟢 فعال' if int(product['active']) else '🔴 غیرفعال'}",
-        f"📦 موجودی آماده: <b>{avail}</b> | فروخته‌شده: <b>{sold}</b>",
-        "",
-        "📝 <b>متن فروش فعلی:</b>",
-        (product["description"] or "—"),
-    ])
+    ]
+    if uses_stock(dtype):
+        lines.append(
+            f"📦 موجودی آماده: <b>{db.count_available_stock(pid)}</b> | "
+            f"فروخته‌شده: <b>{db.count_digital_sales(pid)}</b>"
+        )
+    else:
+        lines.append(f"🙋 سفارش دستی — بدون نیاز به انبار (فروش: {db.count_digital_sales(pid)})")
+    lines += ["", "📝 <b>متن فروش فعلی:</b>", (product["description"] or "—")]
+    return "\n".join(lines)
 
 
 # ====================================================================== #
@@ -175,7 +192,7 @@ async def dp_new_title(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(new_title=title[:120])
     await state.set_state(DigitalAdminStates.new_price)
-    await message.answer("💵 قیمت محصول را به دلار (USDT) بفرستید (مثلاً 8 یا 12.5):")
+    await message.answer("💵 قیمت محصول را به <b>دلار</b> بفرستید (مثلاً 8 یا 12.5):")
 
 
 @router.message(DigitalAdminStates.new_price)
@@ -269,6 +286,51 @@ async def dp_edit_save(message: Message, state: FSMContext, db: Database, servic
 
 
 # ====================================================================== #
+#  روش تحویل
+# ====================================================================== #
+@router.callback_query(F.data.startswith("dp:delivery:"))
+async def dp_delivery(call: CallbackQuery, db: Database) -> None:
+    await call.answer()
+    try:
+        pid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    if not db.get_digital_product(pid):
+        await call.answer("محصول پیدا نشد.", show_alert=True)
+        return
+    from ..digital import DELIVERY_HINTS
+    rows = [
+        [InlineKeyboardButton(text=DELIVERY_LABELS[t], callback_data=f"dp:setdel:{pid}:{t}")]
+        for t in DELIVERY_TYPES
+    ]
+    rows.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data=f"dp:open:{pid}")])
+    hint = "\n".join(f"• {DELIVERY_LABELS[t]}: {DELIVERY_HINTS[t]}" for t in DELIVERY_TYPES)
+    await call.message.answer(
+        "🚚 <b>روش تحویل این محصول را انتخاب کنید:</b>\n\n" + hint,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+
+
+@router.callback_query(F.data.startswith("dp:setdel:"))
+async def dp_setdel(call: CallbackQuery, db: Database, service: Service) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 4 or not parts[2].isdigit() or parts[3] not in DELIVERY_TYPES:
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    pid, dtype = int(parts[2]), parts[3]
+    db.update_digital_product(pid, delivery_type=dtype)
+    db.audit("digital_delivery_set", actor=str(call.from_user.id), detail=f"#{pid} {dtype}")
+    await call.answer(f"روش تحویل: {DELIVERY_LABELS[dtype]}")
+    product = db.get_digital_product(pid)
+    if product:
+        await call.message.answer(
+            _product_detail(db, service, product),
+            reply_markup=_product_actions_kb(pid, active=bool(int(product["active"]))),
+        )
+
+
+# ====================================================================== #
 #  موجودی انبار
 # ====================================================================== #
 @router.callback_query(F.data.startswith("dp:stock:"))
@@ -359,7 +421,8 @@ async def dp_toggle(call: CallbackQuery, db: Database, service: Service) -> None
         await call.answer("محصول پیدا نشد.", show_alert=True)
         return
     new_active = 0 if int(product["active"]) else 1
-    if new_active and db.count_available_stock(pid) <= 0:
+    # فقط محصولات مبتنی بر انبار برای فعال‌شدن به موجودی نیاز دارند؛ تحویل دستی نه.
+    if new_active and uses_stock(product["delivery_type"]) and db.count_available_stock(pid) <= 0:
         await call.answer("⚠️ اول انبار را شارژ کنید؛ بدون موجودی فعال نمی‌شود.", show_alert=True)
         return
     db.update_digital_product(pid, active=new_active)
@@ -402,3 +465,128 @@ async def dp_del_yes(call: CallbackQuery, db: Database) -> None:
     db.audit("digital_product_delete", actor=str(call.from_user.id), detail=f"#{pid}")
     await call.answer("محصول حذف شد.", show_alert=True)
     await call.message.answer("🗑 محصول حذف شد.", reply_markup=_products_list_kb(db))
+
+
+# ====================================================================== #
+#  سفارش‌های تحویل دستی
+# ====================================================================== #
+_MANUAL_STATUS_LABEL = {
+    "awaiting_info": "⏳ منتظر اطلاعات مشتری",
+    "pending": "🟡 آماده‌ی انجام",
+    "done": "✅ انجام‌شده",
+    "cancelled": "❌ لغوشده",
+}
+
+
+@router.callback_query(F.data == "adm:manual")
+async def adm_manual(call: CallbackQuery, db: Database) -> None:
+    await call.answer()
+    rows = db.list_manual_orders(limit=30)
+    pending = [r for r in rows if r["status"] in ("awaiting_info", "pending")]
+    if not rows:
+        await call.message.answer(
+            "🙋 هیچ سفارش تحویل دستی‌ای ثبت نشده است.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[_panel_row()]),
+        )
+        return
+    kb: list[list[InlineKeyboardButton]] = []
+    for r in pending[:20]:
+        product = db.get_digital_product(int(r["product_id"]))
+        title = product["title"] if product else r["slug"]
+        kb.append([InlineKeyboardButton(
+            text=f"{_MANUAL_STATUS_LABEL.get(r['status'], r['status'])} • {title} • 👤{r['buyer_tg_id']}",
+            callback_data=f"dgm:open:{r['id']}",
+        )])
+    kb.append(_panel_row())
+    await call.message.answer(
+        f"🙋 <b>سفارش‌های تحویل دستی</b>\n"
+        f"در انتظار: <b>{len(pending)}</b> | کل اخیر: <b>{len(rows)}</b>\n\n"
+        "روی هر سفارش بزنید تا اطلاعاتش را ببینید:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
+
+
+@router.callback_query(F.data.startswith("dgm:open:"))
+async def dgm_open(call: CallbackQuery, db: Database) -> None:
+    await call.answer()
+    try:
+        mid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    mo = db.get_manual_order(mid)
+    if not mo:
+        await call.answer("سفارش پیدا نشد.", show_alert=True)
+        return
+    product = db.get_digital_product(int(mo["product_id"]))
+    title = product["title"] if product else mo["slug"]
+    creds = mo["credentials"] or "— (هنوز مشتری اطلاعات نفرستاده)"
+    kb: list[list[InlineKeyboardButton]] = []
+    if mo["status"] in ("awaiting_info", "pending"):
+        kb.append([InlineKeyboardButton(text="✅ انجام شد و به مشتری خبر بده", callback_data=f"dgm:done:{mid}")])
+        kb.append([InlineKeyboardButton(text="❌ لغو سفارش", callback_data=f"dgm:cancel:{mid}")])
+    kb.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="adm:manual")])
+    await call.message.answer(
+        "🙋 <b>سفارش تحویل دستی</b>\n"
+        f"🧩 محصول: <b>{escape(title)}</b>\n"
+        f"👤 خریدار: <code>{mo['buyer_tg_id']}</code>\n"
+        f"🧾 سفارش: <code>{escape(mo['order_id'])}</code>\n"
+        f"📌 وضعیت: {_MANUAL_STATUS_LABEL.get(mo['status'], mo['status'])}\n\n"
+        f"🔐 اطلاعات مشتری:\n<code>{escape(creds)}</code>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=kb),
+    )
+
+
+@router.callback_query(F.data.startswith("dgm:done:"))
+async def dgm_done(call: CallbackQuery, db: Database) -> None:
+    try:
+        mid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    mo = db.get_manual_order(mid)
+    if not mo:
+        await call.answer("سفارش پیدا نشد.", show_alert=True)
+        return
+    if mo["status"] == "done":
+        await call.answer("این سفارش قبلاً انجام شده بود.", show_alert=True)
+        return
+    db.set_manual_status(mid, "done")
+    db.audit("manual_done", actor=str(call.from_user.id), detail=mo["order_id"])
+    await call.answer("✅ انجام شد و به مشتری خبر داده شد.")
+    product = db.get_digital_product(int(mo["product_id"]))
+    title = product["title"] if product else mo["slug"]
+    try:
+        await call.bot.send_message(
+            int(mo["buyer_tg_id"]),
+            "🎉 <b>سرویست آماده شد!</b>\n"
+            f"🧩 محصول: <b>{escape(title)}</b>\n\n"
+            "سرویس با موفقیت روی اکانتت فعال شد. اگه سؤالی داشتی یا مشکلی بود، همین‌جا "
+            "به پشتیبانی پیام بده. ممنون که به ما اعتماد کردی 🙏🌟",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("notify customer manual done failed")
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.callback_query(F.data.startswith("dgm:cancel:"))
+async def dgm_cancel(call: CallbackQuery, db: Database) -> None:
+    try:
+        mid = int(call.data.split(":")[2])
+    except (ValueError, IndexError):
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    mo = db.get_manual_order(mid)
+    if not mo:
+        await call.answer("سفارش پیدا نشد.", show_alert=True)
+        return
+    db.set_manual_status(mid, "cancelled")
+    db.audit("manual_cancel", actor=str(call.from_user.id), detail=mo["order_id"])
+    await call.answer("سفارش لغو شد.", show_alert=True)
+    try:
+        await call.message.edit_reply_markup(reply_markup=None)
+    except Exception:  # noqa: BLE001
+        pass

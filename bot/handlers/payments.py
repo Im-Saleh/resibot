@@ -115,6 +115,39 @@ async def pm_crypto(call: CallbackQuery, service: Service, db: Database) -> None
     await call.message.answer(text, reply_markup=kb)
 
 
+@router.callback_query(F.data.startswith("pm:hoosh:"))
+async def pm_hooshpay(call: CallbackQuery, service: Service, db: Database) -> None:
+    order_id = call.data.split(":", 2)[2]
+    row = await _owned_waiting_payment(order_id, call.from_user.id, db)
+    if not row:
+        await call.answer("فاکتور پیدا نشد.", show_alert=True)
+        return
+    if int(row["credited"] or 0):
+        await call.answer("این فاکتور قبلاً پرداخت شده است.", show_alert=True)
+        return
+    await call.answer()
+    wait = await call.message.answer("⏳ در حال ساخت لینک پرداخت ریالی...")
+    try:
+        info = await service.prepare_hooshpay_payment(order_id)
+    except ValueError as exc:
+        await wait.edit_text(f"⛔️ {escape(str(exc))}")
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("prepare hooshpay failed")
+        await wait.edit_text(f"❌ خطا در ساخت لینک پرداخت:\n<code>{escape(str(exc))}</code>")
+        return
+    payable = info.get("payable_amount") or info.get("amount_toman")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="💳 پرداخت ریالی (کارت‌به‌کارت)", url=info["payment_url"])]]
+    )
+    await wait.edit_text(
+        f"🧾 فاکتور ریالی به مبلغ <b>{int(payable):,} تومان</b> ساخته شد.\n"
+        "روی دکمه‌ی زیر بزنید، کارت‌به‌کارت کنید و منتظر تأیید آنی بمانید. "
+        "پس از پرداخت، سرویس/شارژ شما به‌صورت خودکار انجام می‌شود. ✅",
+        reply_markup=kb,
+    )
+
+
 @router.callback_query(F.data.startswith("pm:now:"))
 async def pm_nowpayments(call: CallbackQuery, service: Service, db: Database) -> None:
     order_id = call.data.split(":", 2)[2]

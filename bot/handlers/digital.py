@@ -22,6 +22,7 @@ from ..database import Database
 from ..fulfillment import _deliver_digital
 from ..keyboards import back_to_menu_kb, digital_detail_kb, digital_products_menu, digital_pay_kb
 from ..service import Service
+from ..states import DigitalManualStates
 
 logger = logging.getLogger("resibot.digital")
 router = Router(name="digital")
@@ -53,11 +54,9 @@ async def menu_digital(call: CallbackQuery, state: FSMContext, service: Service,
 
 
 def _detail_text(service: Service, product, avail: int) -> str:
+    from ..digital import DELIVERY_LABELS, normalize_delivery, uses_stock
     price_usd = float(product["price"])
-    price_toman = service.digital_price_toman(price_usd)
-    stock_line = (
-        f"📦 موجودی: <b>{avail}</b> عدد آماده‌ی تحویل" if avail > 0 else "📦 موجودی: <b>ناموجود</b> ⛔️"
-    )
+    dtype = normalize_delivery(product["delivery_type"])
     parts = [
         f"🧩 <b>{escape(product['title'])}</b>",
     ]
@@ -66,8 +65,13 @@ def _detail_text(service: Service, product, avail: int) -> str:
     parts.append("")
     parts.append(product["description"] or "")
     parts.append("")
-    parts.append(f"💵 قیمت: <b>{price_usd:g} USDT</b>  (≈ {price_toman:g} {service.currency})")
-    parts.append(stock_line)
+    parts.append(f"💵 قیمت: <b>{price_usd:g} دلار</b>")
+    parts.append(f"🚚 تحویل: {DELIVERY_LABELS.get(dtype, dtype)}")
+    if uses_stock(dtype):
+        parts.append(
+            f"📦 موجودی: <b>{avail}</b> عدد آماده‌ی تحویل" if avail > 0
+            else "📦 موجودی: <b>ناموجود</b> ⛔️"
+        )
     return "\n".join(parts)
 
 
@@ -86,8 +90,16 @@ async def dg_open(call: CallbackQuery, service: Service, db: Database) -> None:
     avail = db.count_available_stock(pid)
     await call.message.answer(
         _detail_text(service, product, avail),
-        reply_markup=digital_detail_kb(pid, in_stock=avail > 0),
+        reply_markup=digital_detail_kb(pid, in_stock=_available(db, product)),
     )
+
+
+def _available(db: Database, product) -> bool:
+    """آیا محصول قابل خرید است؟ محصولات تحویل‌دستی همیشه موجودند؛ بقیه به انبار نیاز دارند."""
+    from ..digital import uses_stock
+    if not uses_stock(product["delivery_type"]):
+        return True
+    return db.count_available_stock(int(product["id"])) > 0
 
 
 @router.callback_query(F.data.startswith("dg:notify:"))
@@ -112,7 +124,7 @@ async def dg_buy(
     if not product or not int(product["active"]):
         await call.message.answer("این محصول دیگر در دسترس نیست.", reply_markup=back_to_menu_kb())
         return
-    if db.count_available_stock(pid) <= 0:
+    if not _available(db, product):
         await call.message.answer(
             "متأسفانه موجودی این محصول همین حالا تمام شد. کمی بعد دوباره امتحان کنید. 🙏",
             reply_markup=back_to_menu_kb(),
@@ -150,11 +162,86 @@ async def dg_buy(
     await call.message.answer(
         f"🧾 <b>فاکتور خرید</b>\n"
         f"🧩 محصول: <b>{escape(product['title'])}</b>\n"
-        f"💵 مبلغ: <b>{float(product['price']):g} USDT</b> (≈ {price_toman:g} {service.currency})"
+        f"💵 مبلغ: <b>{float(product['price']):g} دلار</b>"
         f"{wallet_line}\n\n"
         "روش پرداخت را انتخاب کنید:",
         reply_markup=digital_pay_kb(order_id, methods, wallet=wallet_ok),
     )
+
+
+# ---------------------------------------------------------------------- #
+#  تحویل دستی: دریافت ایمیل و رمز از مشتری
+# ---------------------------------------------------------------------- #
+@router.callback_query(F.data.startswith("dgm:info:"))
+async def dgm_info_start(call: CallbackQuery, state: FSMContext, db: Database) -> None:
+    order_id = call.data.split(":", 2)[2]
+    mo = db.get_manual_order_by_order(order_id)
+    if not mo or int(mo["buyer_tg_id"]) != call.from_user.id:
+        await call.answer("این سفارش پیدا نشد.", show_alert=True)
+        return
+    if mo["status"] not in ("awaiting_info", "pending"):
+        await call.answer("این سفارش قبلاً پردازش شده است.", show_alert=True)
+        return
+    await state.set_state(DigitalManualStates.entering_email)
+    await state.update_data(manual_order_id=order_id)
+    await call.answer()
+    await call.message.answer(
+        "📧 لطفاً <b>ایمیل اکانتت</b> رو بفرست (همون اکانتی که می‌خوای سرویس روش فعال بشه):"
+    )
+
+
+@router.message(DigitalManualStates.entering_email)
+async def dgm_email(message: Message, state: FSMContext) -> None:
+    email = (message.text or "").strip()
+    if len(email) < 4 or " " in email:
+        await message.answer("⛔️ ایمیل معتبر نیست. دوباره بفرست:")
+        return
+    await state.update_data(manual_email=email[:200])
+    await state.set_state(DigitalManualStates.entering_password)
+    await message.answer("🔑 حالا <b>رمز عبور اکانت</b> رو بفرست:")
+
+
+@router.message(DigitalManualStates.entering_password)
+async def dgm_password(message: Message, state: FSMContext, db: Database, cfg: Settings) -> None:
+    password = (message.text or "").strip()
+    if len(password) < 3:
+        await message.answer("⛔️ رمز خیلی کوتاهه. دوباره بفرست:")
+        return
+    data = await state.get_data()
+    await state.clear()
+    order_id = data.get("manual_order_id", "")
+    email = data.get("manual_email", "")
+    mo = db.get_manual_order_by_order(order_id)
+    if not mo or int(mo["buyer_tg_id"]) != message.from_user.id:
+        await message.answer("⛔️ سفارش پیدا نشد.")
+        return
+    db.set_manual_credentials(order_id, f"{email} | {password}")
+    await message.answer(
+        "✅ اطلاعاتت دریافت شد! 🙌\n"
+        "کارشناس ما در سریع‌ترین زمان ممکن سرویس رو روی اکانتت فعال می‌کنه و همین‌جا "
+        "بهت خبر می‌ده. ممنون از صبرت. 🌟"
+    )
+    # اطلاع به ادمین با دکمه‌ی «انجام شد»
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    product = db.get_digital_product(int(mo["product_id"]))
+    title = product["title"] if product else mo["slug"]
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ انجام شد و به مشتری خبر بده", callback_data=f"dgm:done:{mo['id']}")
+    ]])
+    try:
+        await message.bot.send_message(
+            cfg.admin_id,
+            "🙋 <b>اطلاعات اکانت مشتری رسید</b>\n"
+            f"🧩 محصول: <b>{escape(title)}</b>\n"
+            f"👤 خریدار: <code>{mo['buyer_tg_id']}</code>\n"
+            f"🧾 سفارش: <code>{escape(order_id)}</code>\n\n"
+            f"📧 ایمیل: <code>{escape(email)}</code>\n"
+            f"🔑 رمز: <code>{escape(password)}</code>\n\n"
+            "کار رو انجام بده و بعد دکمه‌ی زیر رو بزن تا به مشتری خبر داده بشه. 👇",
+            reply_markup=kb,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("notify admin manual order failed")
 
 
 @router.callback_query(F.data.startswith("dg:wallet:"))
@@ -184,7 +271,7 @@ async def dg_wallet(call: CallbackQuery, service: Service, db: Database, cfg: Se
         return
 
     price_toman = service.digital_price_toman(float(product["price"]))
-    if db.count_available_stock(int(product["id"])) <= 0:
+    if not _available(db, product):
         await call.message.answer("متأسفانه موجودی همین حالا تمام شد. مبلغی از شما کسر نشد.")
         return
 

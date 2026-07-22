@@ -144,6 +144,15 @@ class Settings:
     # ارز پرداخت پیش‌فرض درگاه؛ حالا USDT روی شبکه‌ی BEP20 (BSC)
     nowpayments_pay_currency: str = field(default_factory=lambda: _get("NOWPAYMENTS_PAY_CURRENCY", "usdtbsc"))
 
+    # --- درگاه ریالی HooshPay (کارت‌به‌کارت با تأیید آنی) ---
+    # مقادیر اولیه؛ در دیتابیس ماندگار می‌شوند و از پنل ربات/وب قابل ویرایش‌اند.
+    hooshpay_enabled: bool = field(default_factory=lambda: _get_bool("HOOSHPAY_ENABLED", False))
+    hooshpay_api_key: str = field(default_factory=lambda: _get("HOOSHPAY_API_KEY"))
+    hooshpay_api_secret: str = field(default_factory=lambda: _get("HOOSHPAY_API_SECRET"))
+    hooshpay_base_url: str = field(default_factory=lambda: _get("HOOSHPAY_BASE_URL", "https://hooshpay.xyz"))
+    # نحوه‌ی تقسیم کارمزد: buyer | seller | split
+    hooshpay_fee_mode: str = field(default_factory=lambda: _get("HOOSHPAY_FEE_MODE", "buyer"))
+
     # --- پرداخت مستقیم کریپتو (USDT BEP20 / BSC) ---
     # آدرس مقصد که پول مستقیم به آن واریز می‌شود (بدون واسطه، بدون فی انتقال).
     crypto_wallet_address: str = field(
@@ -230,6 +239,22 @@ class Settings:
             host = server_ip or self.server_ip
             base = f"{scheme}://{host}:{self.ipn_port}"
         return base.rstrip("/") + "/nowpayments/ipn"
+
+    def _ipn_base(self, server_ip: str = "") -> str:
+        base = self.public_base_url
+        if not base:
+            scheme = "https" if (self.ipn_cert_file and self.ipn_key_file) else "http"
+            host = server_ip or self.server_ip
+            base = f"{scheme}://{host}:{self.ipn_port}"
+        return base.rstrip("/")
+
+    def hooshpay_callback_url(self, server_ip: str = "") -> str:
+        """آدرس وب‌هوکِ پرداخت موفق HooshPay (روی همان سرور IPN)."""
+        return self._ipn_base(server_ip) + "/hooshpay/callback"
+
+    def hooshpay_return_url(self, server_ip: str = "") -> str:
+        """آدرس بازگشت مشتری پس از پرداخت (صفحه‌ی ساده‌ی «به ربات برگردید»)."""
+        return self._ipn_base(server_ip) + "/hooshpay/return"
 
     def db_full_path(self) -> Path:
         p = Path(self.db_path)

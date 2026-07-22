@@ -14,6 +14,7 @@ from aiohttp import web
 from .config import Settings
 from .database import Database
 from .fulfillment import deliver_paid_order
+from .hooshpay import PAID_STATUSES as HP_PAID_STATUSES, verify_signature as hp_verify
 from .nowpayments import PAID_STATUSES, verify_ipn_signature
 
 logger = logging.getLogger("resibot.ipn")
@@ -58,9 +59,56 @@ def make_ipn_app(cfg: Settings, db: Database, bot: Any, service: Any = None) -> 
 
         return web.json_response({"ok": True})
 
+    async def hooshpay_callback(request: web.Request) -> web.Response:
+        """وب‌هوک پرداخت موفق HooshPay (درگاه ریالی)."""
+        raw = await request.read()
+        signature = request.headers.get("X-HooshPay-Signature", "")
+        try:
+            import json
+            payload = json.loads(raw.decode("utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("payload must be object")
+        except Exception:
+            logger.warning("HooshPay callback با بدنه‌ی نامعتبر رد شد")
+            return web.json_response({"error": "bad request"}, status=400)
+
+        secret = service.hooshpay_api_secret if service is not None else ""
+        if not hp_verify(payload, signature, secret):
+            logger.warning("HooshPay callback با امضای نامعتبر رد شد")
+            return web.json_response({"error": "invalid signature"}, status=403)
+
+        order_id = str(payload.get("order_id") or "")
+        status = str(payload.get("status") or "")
+        payment = db.get_payment_by_order(order_id)
+        if not payment:
+            return web.json_response({"ok": True})
+
+        db.set_payment_status(order_id, status, invoice_id=str(payload.get("invoice") or ""))
+        if status in HP_PAID_STATUSES:
+            credited = db.credit_payment_once(order_id)
+            if credited is not None:
+                await deliver_paid_order(bot, cfg, db, service, credited)
+        return web.json_response({"ok": True})
+
+    async def hooshpay_return(_request: web.Request) -> web.Response:
+        return web.Response(
+            text=(
+                "<!doctype html><html lang='fa' dir='rtl'><head><meta charset='utf-8'>"
+                "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+                "<title>بازگشت از پرداخت</title></head>"
+                "<body style='font-family:Tahoma;background:#0f0c29;color:#eee;text-align:center;padding:60px'>"
+                "<h2>✅ پرداخت شما دریافت شد</h2>"
+                "<p>می‌توانید به ربات تلگرام برگردید؛ سرویس/شارژ شما به‌صورت خودکار اعمال می‌شود.</p>"
+                "</body></html>"
+            ),
+            content_type="text/html",
+        )
+
     app.router.add_get("/", health)
     app.router.add_get("/health", health)
     app.router.add_post("/nowpayments/ipn", ipn_handler)
+    app.router.add_post("/hooshpay/callback", hooshpay_callback)
+    app.router.add_get("/hooshpay/return", hooshpay_return)
     return app
 
 
