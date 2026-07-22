@@ -85,3 +85,12 @@ class AdminStates(StatesGroup):
     credit_id = State()
     credit_amount = State()
     broadcast_text = State()
+
+
+class DigitalAdminStates(StatesGroup):
+    """مدیریت محصولات دیجیتال توسط ادمین."""
+    new_slug = State()       # شناسه‌ی یکتای محصول جدید
+    new_title = State()      # عنوان محصول جدید
+    new_price = State()      # قیمت محصول جدید (USD)
+    edit_value = State()     # ویرایش یک فیلد مشخص (product_id + field در state ذخیره می‌شود)
+    add_stock = State()      # افزودن موجودی (هر خط یک اکانت/کد)

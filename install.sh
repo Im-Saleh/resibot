@@ -170,6 +170,16 @@ if [[ "$RECONF" =~ ^[Yy]$ ]]; then
   ask IPN_CERT_FILE "مسیر فایل گواهی (fullchain.pem) - اختیاری" ""
   ask IPN_KEY_FILE "مسیر فایل کلید (privkey.pem) - اختیاری" ""
 
+  echo
+  bold "— پنل وب مدیریتی (امن) —"
+  echo "پنل وب در همان پراسس ربات اجرا می‌شود. برای فعال شدن، یک رمز عبور قوی بگذارید."
+  ask WEB_PANEL_ENABLED "پنل وب فعال باشد؟ (1=بله، 0=خیر)" "1"
+  ask WEB_PANEL_PORT "پورت پنل وب" "8095"
+  ask_secret WEB_PANEL_PASSWORD "رمز عبور پنل وب (برای فعال شدن حتماً لازم است)"
+  ask WEB_PANEL_ALLOWED_IPS "IPهای مجاز برای پنل وب (با کاما؛ خالی=همه)" ""
+  # کلید مخفی امضای سشن به‌صورت خودکار ساخته می‌شود تا نشست‌ها پایدار بمانند.
+  WEB_PANEL_SECRET="$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+
   bold "==> نوشتن فایل .env"
   cat > "$ENV_FILE" <<EOF
 BOT_TOKEN=${BOT_TOKEN}
@@ -259,6 +269,15 @@ V2RAY_PLAN_DAYS=30
 V2RAY_PLAN_PRICE=${V2RAY_PLAN_PRICE}
 V2RAY_PLAN_RESELLER_PRICE=${V2RAY_PLAN_RESELLER_PRICE}
 
+WEB_PANEL_ENABLED=${WEB_PANEL_ENABLED}
+WEB_PANEL_HOST=0.0.0.0
+WEB_PANEL_PORT=${WEB_PANEL_PORT}
+WEB_PANEL_PASSWORD=${WEB_PANEL_PASSWORD}
+WEB_PANEL_SECRET=${WEB_PANEL_SECRET}
+WEB_PANEL_CERT_FILE=
+WEB_PANEL_KEY_FILE=
+WEB_PANEL_ALLOWED_IPS=${WEB_PANEL_ALLOWED_IPS}
+
 DB_PATH=data/resibot.db
 EOF
   chmod 600 "$ENV_FILE"
@@ -301,3 +320,11 @@ green "✅ نصب کامل شد!"
 green "مشاهده‌ی لاگ زنده:   journalctl -u ${SERVICE_NAME} -f"
 green "ری‌استارت:           systemctl restart ${SERVICE_NAME}"
 green "آپدیت بدون از دست رفتن دیتابیس:   bash ${INSTALL_DIR}/update.sh"
+green "ابزار مدیریت/نگهداری:   bash ${INSTALL_DIR}/manage.sh help"
+if grep -qE "^WEB_PANEL_PASSWORD=.+" "$ENV_FILE" 2>/dev/null; then
+  WEB_PORT_SHOW="$(grep -E '^WEB_PANEL_PORT=' "$ENV_FILE" | cut -d= -f2-)"
+  green "🌐 پنل وب مدیریتی روی پورت ${WEB_PORT_SHOW:-8095} فعال است: http://<IP-سرور>:${WEB_PORT_SHOW:-8095}/panel"
+  green "   توصیه‌ی امنیتی: این پورت را پشت HTTPS/فایروال بگذارید و WEB_PANEL_ALLOWED_IPS را تنظیم کنید."
+else
+  green "🌐 پنل وب: رمز تنظیم نشده؛ برای فعال‌سازی: bash ${INSTALL_DIR}/manage.sh webpass"
+fi

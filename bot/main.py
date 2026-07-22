@@ -21,6 +21,7 @@ from .middlewares import ContextMiddleware, ThrottleMiddleware
 from .nowpayments import NowPaymentsClient
 from .panel import PanelClient
 from .service import Service
+from .webpanel import start_web_panel
 
 logging.basicConfig(
     level=logging.INFO,
@@ -66,7 +67,7 @@ async def run() -> None:
     dp["service"] = service
 
     # میدلور ضدفلاد (اول) و سپس ثبت کاربر و تزریق نقش
-    dp.update.outer_middleware(ThrottleMiddleware(settings))
+    dp.update.outer_middleware(ThrottleMiddleware(settings, db))
     dp.update.outer_middleware(ContextMiddleware(settings, db))
 
     # هندلر سراسری خطا: هیچ خطای هندلری نباید ربات را از کار بیندازد یا اطلاعات لو دهد.
@@ -86,6 +87,16 @@ async def run() -> None:
             logger.exception("راه‌اندازی سرور IPN ناموفق بود؛ شارژ خودکار غیرفعال می‌ماند")
     else:
         logger.info("NowPayments پیکربندی نشده؛ شارژ کیف پول از طریق درگاه غیرفعال است")
+
+    # پنل وب مدیریتی (aiohttp) — فقط اگر فعال و دارای پسورد باشد.
+    web_runner = None
+    if settings.web_panel_active:
+        try:
+            web_runner = await start_web_panel(settings, db, service)
+        except Exception:  # noqa: BLE001
+            logger.exception("راه‌اندازی پنل وب ناموفق بود؛ ربات بدون پنل وب ادامه می‌دهد")
+    elif settings.web_panel_enabled and not settings.web_panel_password:
+        logger.warning("پنل وب فعال است اما WEB_PANEL_PASSWORD تنظیم نشده؛ پنل وب بالا نمی‌آید.")
 
     # رصدگر پرداخت مستقیم کریپتو (USDT BEP20) — فقط رصد، بدون کلید خصوصی.
     async def _settle_crypto(order_id: str, tx_hash: str) -> None:
@@ -130,6 +141,8 @@ async def run() -> None:
                 pass
         if ipn_runner is not None:
             await ipn_runner.cleanup()
+        if web_runner is not None:
+            await web_runner.cleanup()
         await panel.close()
         db.close()
         await bot.session.close()

@@ -111,6 +111,7 @@ def products_menu(
     residential: bool = True,
     residential2: bool = True,
     v2ray: bool = True,
+    digital: bool = False,
 ) -> InlineKeyboardMarkup:
     """منوی محصولات؛ فقط محصولات فعال‌شده نمایش داده می‌شوند."""
     rows: list[list[InlineKeyboardButton]] = []
@@ -120,9 +121,61 @@ def products_menu(
         rows.append([InlineKeyboardButton(text="🌍 کانفیگ رزیدنتال ۲", callback_data="buy:residential2")])
     if v2ray:
         rows.append([InlineKeyboardButton(text="🛡 کانفیگ V2Ray (عادی)", callback_data="buy:v2ray")])
+    if digital:
+        rows.append([InlineKeyboardButton(text="🤖 اشتراک‌های هوش مصنوعی", callback_data="menu:digital")])
     if not rows:
         rows.append([InlineKeyboardButton(text="—", callback_data="noop")])
     rows.append(_home_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# ---------------------------------------------------------------------- #
+#  محصولات دیجیتال (اکانت/اشتراک آماده)
+# ---------------------------------------------------------------------- #
+def digital_products_menu(products: list, stock: dict | None = None) -> InlineKeyboardMarkup:
+    """لیست محصولات دیجیتال فعال؛ هر محصول یک دکمه‌ی شیشه‌ای."""
+    stock = stock or {}
+    rows: list[list[InlineKeyboardButton]] = []
+    for p in products:
+        avail = int(stock.get(int(p["id"]), 0))
+        badge = "" if avail > 0 else " (ناموجود)"
+        rows.append([InlineKeyboardButton(
+            text=f"{p['title']}{badge}", callback_data=f"dg:open:{p['id']}"
+        )])
+    if not rows:
+        rows.append([InlineKeyboardButton(text="فعلاً محصولی نیست", callback_data="noop")])
+    rows.append(_home_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def digital_detail_kb(product_id: int, *, in_stock: bool) -> InlineKeyboardMarkup:
+    """صفحه‌ی جزئیات محصول دیجیتال: خرید + بازگشت."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if in_stock:
+        rows.append([InlineKeyboardButton(text="🛒 خرید این محصول", callback_data=f"dg:buy:{product_id}")])
+    else:
+        rows.append([InlineKeyboardButton(text="🔔 اطلاع هنگام موجود شدن", callback_data=f"dg:notify:{product_id}")])
+    rows.append([InlineKeyboardButton(text="⬅️ بازگشت به لیست", callback_data="menu:digital")])
+    rows.append(_home_row())
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def digital_pay_kb(order_id: str, methods: list[str], *, wallet: bool = False) -> InlineKeyboardMarkup:
+    """انتخاب روش پرداخت برای محصول دیجیتال (کیف پول + کریپتو + درگاه)."""
+    rows: list[list[InlineKeyboardButton]] = []
+    if wallet:
+        rows.append([InlineKeyboardButton(
+            text="💼 پرداخت از کیف پول", callback_data=f"dg:wallet:{order_id}"
+        )])
+    if "crypto" in methods:
+        rows.append([InlineKeyboardButton(
+            text="💠 پرداخت مستقیم USDT (BEP20)", callback_data=f"pm:crypto:{order_id}"
+        )])
+    if "nowpayments" in methods:
+        rows.append([InlineKeyboardButton(
+            text="🌐 پرداخت با درگاه", callback_data=f"pm:now:{order_id}"
+        )])
+    rows.append([InlineKeyboardButton(text="❌ انصراف", callback_data=f"pm:cancel:{order_id}")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -417,27 +470,39 @@ def confirm_delete(config_id: int) -> InlineKeyboardMarkup:
 #  پنل مدیریت
 # ---------------------------------------------------------------------- #
 def admin_panel_menu(pending_count: int = 0, *, maintenance_on: bool = False) -> InlineKeyboardMarkup:
+    """پنل مدیریت — چیدمان تمیز و گروه‌بندی‌شده؛ همه‌چیز دکمه‌ی شیشه‌ای."""
     pending_label = "🤝 درخواست‌های همکاری"
     if pending_count:
         pending_label += f" ({pending_count})"
     maint_label = ("🟢 حالت تعمیر: خاموش" if not maintenance_on else "🔧 حالت تعمیر: روشن")
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            # — نمای کلی —
             [InlineKeyboardButton(text="📊 گزارش و آمار", callback_data="adm:report")],
-            [InlineKeyboardButton(text="🧾 همه‌ی سرویس‌ها", callback_data="adm:configs")],
+            # — فروش و محصولات —
             [
-                InlineKeyboardButton(text="🔎 پروفایل/مدیریت کاربر", callback_data="adm:userinfo"),
-                InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:payments"),
+                InlineKeyboardButton(text="🧾 سرویس‌ها", callback_data="adm:configs"),
+                InlineKeyboardButton(text="🤖 محصولات دیجیتال", callback_data="adm:digital"),
             ],
-            [InlineKeyboardButton(text=pending_label, callback_data="adm:requests")],
-            [InlineKeyboardButton(text="👤 مدیریت کاربران/نقش‌ها", callback_data="adm:users")],
-            [InlineKeyboardButton(text="💳 شارژ دستی کیف پول", callback_data="adm:credit")],
-            [InlineKeyboardButton(text="📣 پیام همگانی", callback_data="adm:broadcast")],
             [
                 InlineKeyboardButton(text="💵 قیمت‌ها", callback_data="adm:prices"),
                 InlineKeyboardButton(text="💳 روش‌های پرداخت", callback_data="adm:pay"),
             ],
-            [InlineKeyboardButton(text="🎁 رفرال و تخفیف کاربران", callback_data="adm:refdisc")],
+            # — کاربران —
+            [
+                InlineKeyboardButton(text="🔎 پروفایل کاربر", callback_data="adm:userinfo"),
+                InlineKeyboardButton(text="👤 مدیریت کاربران", callback_data="adm:users"),
+            ],
+            [
+                InlineKeyboardButton(text="💳 شارژ دستی", callback_data="adm:credit"),
+                InlineKeyboardButton(text="🧾 تراکنش‌ها", callback_data="adm:payments"),
+            ],
+            [
+                InlineKeyboardButton(text=pending_label, callback_data="adm:requests"),
+                InlineKeyboardButton(text="🎁 رفرال/تخفیف", callback_data="adm:refdisc"),
+            ],
+            [InlineKeyboardButton(text="📣 پیام همگانی", callback_data="adm:broadcast")],
+            # — پیکربندی —
             [
                 InlineKeyboardButton(text="⚙️ تنظیمات سرور", callback_data="adm:settings"),
                 InlineKeyboardButton(text="🔀 نمایش بخش‌ها", callback_data="adm:toggles"),
@@ -445,6 +510,11 @@ def admin_panel_menu(pending_count: int = 0, *, maintenance_on: bool = False) ->
             [
                 InlineKeyboardButton(text="📡 وضعیت سرویس‌ها", callback_data="menu:status"),
                 InlineKeyboardButton(text="🤖 ربات کمکی", callback_data="adm:custbot"),
+            ],
+            # — سیستم و امنیت —
+            [
+                InlineKeyboardButton(text="🌐 پنل وب مدیریتی", callback_data="adm:web"),
+                InlineKeyboardButton(text="🛡 لاگ امنیتی", callback_data="adm:audit"),
             ],
             [
                 InlineKeyboardButton(text="💾 پشتیبان دیتابیس", callback_data="adm:backup"),

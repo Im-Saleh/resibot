@@ -86,5 +86,22 @@ if [[ -f "$INSTALL_DIR/resibot-customer.service" ]] && grep -qE "^CUSTOMER_BOT_T
   systemctl --no-pager --lines=10 status "$CUSTOMER_SERVICE_NAME" || true
 fi
 
+# هرس لاگ حسابرسی قدیمی (جلوگیری از رشد بی‌رویه‌ی دیتابیس)
+if [[ -f "data/resibot.db" && -x ".venv/bin/python" ]]; then
+  ./.venv/bin/python - <<'PYEOF' || true
+import os
+os.chdir(os.path.dirname(os.path.abspath("data/resibot.db")) or ".")
+try:
+    from bot.config import settings
+    from bot.database import Database
+    db = Database(settings.db_full_path())
+    db.prune_audit(keep=5000)
+    db.close()
+except Exception as e:
+    print("prune skipped:", e)
+PYEOF
+fi
+
 green ""
 green "✅ آپدیت کامل شد. دیتابیس و تنظیمات حفظ شدند."
+green "ابزار نگهداری:   bash ${INSTALL_DIR}/manage.sh help"

@@ -460,3 +460,160 @@ def test_customer_service_actions_has_loc_and_life_buttons():
     assert "cs_loc:42" in cbs
     assert "cs_life:42" in cbs
     assert "cs_ip:42" in cbs
+
+
+
+# --------------------------- digital products -------------------------- #
+from bot import digital as _digital
+
+
+def test_digital_meta_helpers():
+    assert _digital.meta_for_slug("gemini_18m") == "digital:gemini_18m"
+    assert _digital.is_digital_meta("digital:gemini_18m")
+    assert not _digital.is_digital_meta("residential")
+    assert _digital.slug_from_meta("digital:chatgpt_1m") == "chatgpt_1m"
+    assert _digital.slug_from_meta("v2ray") == ""
+
+
+def test_valid_slug():
+    assert _digital.valid_slug("gemini_18m")
+    assert _digital.valid_slug("chatgpt-1m")
+    assert not _digital.valid_slug("Bad Slug")
+    assert not _digital.valid_slug("a")          # خیلی کوتاه
+    assert not _digital.valid_slug("_start")     # نباید با _ شروع شود
+
+
+def test_seed_default_products_idempotent():
+    svc, db = _make_service()
+    # seed_settings قبلاً محصولات پیش‌فرض را ساخته است
+    slugs = {p["slug"] for p in db.list_digital_products()}
+    assert {"gemini_18m", "chatgpt_1m"} <= slugs
+    before = len(db.list_digital_products())
+    _digital.seed_default_products(db)  # دوباره نباید تکراری بسازد
+    assert len(db.list_digital_products()) == before
+
+
+def test_digital_stock_claim_atomic_and_idempotent():
+    svc, db = _make_service()
+    gem = db.get_digital_product_by_slug("gemini_18m")
+    pid = int(gem["id"])
+    assert db.add_stock_items(pid, ["acc-1", "acc-2", "", "  "]) == 2
+    assert db.count_available_stock(pid) == 2
+    row = db.claim_stock_item(pid, 111, "ord-A")
+    assert row["payload"] == "acc-1"
+    assert db.count_available_stock(pid) == 1
+    # همان سفارش دوباره → همان قلم (idempotent، بدون مصرف موجودی جدید)
+    row2 = db.claim_stock_item(pid, 111, "ord-A")
+    assert row2["id"] == row["id"]
+    assert db.count_available_stock(pid) == 1
+    # سفارش دیگر → قلم بعدی
+    row3 = db.claim_stock_item(pid, 222, "ord-B")
+    assert row3["payload"] == "acc-2"
+    assert db.count_available_stock(pid) == 0
+    # بدون موجودی → None
+    assert db.claim_stock_item(pid, 333, "ord-C") is None
+    assert db.count_digital_sales(pid) == 2
+
+
+def test_digital_price_toman():
+    svc, db = _make_service()
+    svc.set_setting("toman_per_usd", "100000")
+    assert svc.digital_price_toman(8) == 800000.0
+
+
+def test_create_digital_order_meta():
+    import json
+    svc, db = _make_service()
+    gem = db.get_digital_product_by_slug("gemini_18m")
+    oid = svc.create_digital_order(555, gem)
+    row = db.get_payment_by_order(oid)
+    meta = json.loads(row["meta"])
+    assert meta["product"] == "digital:gemini_18m"
+    assert meta["digital_slug"] == "gemini_18m"
+    assert row["purpose"] == "order"
+
+
+def test_audit_log_roundtrip_and_prune():
+    svc, db = _make_service()
+    for i in range(10):
+        db.audit("test_event", actor=str(i), detail=f"d{i}")
+    rows = db.list_audit(limit=5)
+    assert len(rows) == 5
+    assert rows[0]["action"] == "test_event"
+    db.prune_audit(keep=3)
+    assert len(db.list_audit(limit=100)) == 3
+
+
+# --------------------------- web panel security ------------------------- #
+from bot.webpanel.security import (
+    LoginRateLimiter,
+    SessionManager,
+    csrf_ok,
+    hash_password,
+    new_csrf_token,
+    verify_password,
+)
+
+
+def test_password_hash_verify():
+    h = hash_password("Str0ng!")
+    assert h.startswith("pbkdf2_sha256$")
+    assert verify_password("Str0ng!", h)
+    assert not verify_password("wrong", h)
+    # مسیر متن ساده
+    assert verify_password("plain", "plain")
+    assert not verify_password("plain", "other")
+    assert not verify_password("", "x")
+
+
+def test_session_sign_and_tamper():
+    sm = SessionManager("secret-key", ttl_seconds=100)
+    tok = sm.create({"sub": "admin", "csrf": "abc"})
+    payload = sm.verify(tok)
+    assert payload and payload["sub"] == "admin" and payload["csrf"] == "abc"
+    # دستکاری امضا → رد
+    body, sig = tok.rsplit(".", 1)
+    assert sm.verify(body + ".deadbeef") is None
+    # کلید متفاوت → رد
+    assert SessionManager("other-key").verify(tok) is None
+
+
+def test_session_expiry():
+    sm = SessionManager("k", ttl_seconds=-1)  # فوراً منقضی
+    assert sm.verify(sm.create({"x": 1})) is None
+
+
+def test_csrf_ok():
+    t = new_csrf_token()
+    assert csrf_ok(t, t)
+    assert not csrf_ok(t, "other")
+    assert not csrf_ok("", "")
+
+
+def test_login_rate_limiter_locks():
+    rl = LoginRateLimiter(max_fails=3, window=100, lock=100)
+    ip = "1.2.3.4"
+    assert rl.locked_seconds(ip) == 0
+    for _ in range(3):
+        rl.record_failure(ip)
+    assert rl.locked_seconds(ip) > 0        # قفل شد
+    # موفقیت → پاک‌سازی
+    rl2 = LoginRateLimiter()
+    rl2.record_failure("9.9.9.9")
+    rl2.record_success("9.9.9.9")
+    assert rl2.locked_seconds("9.9.9.9") == 0
+
+
+def test_web_app_builds():
+    # اطمینان از اینکه اپ aiohttp بدون خطا ساخته می‌شود و مسیرها ثبت شده‌اند.
+    from bot.config import Settings
+    from bot.webpanel.app import make_web_app
+    svc, db = _make_service()
+    cfg = Settings()
+    cfg.web_panel_password = "x"
+    cfg.web_panel_secret = "s" * 32
+    app = make_web_app(cfg, db, svc)
+    paths = {r.resource.canonical for r in app.router.routes()}
+    assert "/panel" in paths
+    assert "/panel/login" in paths
+    assert "/panel/products" in paths

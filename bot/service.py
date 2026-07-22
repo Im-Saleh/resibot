@@ -40,6 +40,7 @@ from .inbound import (
     build_sub_link,
     build_vless_link,
 )
+from . import digital
 from .panel import PanelClient, PanelError
 from .proxy import (
     IPROYAL_MAX_LIFE_MIN,
@@ -82,6 +83,7 @@ S_SHOW_PARTNERSHIP = "show_partnership"
 S_SHOW_RESIDENTIAL = "show_residential"
 S_SHOW_RESIDENTIAL2 = "show_residential2"
 S_SHOW_V2RAY = "show_v2ray"
+S_SHOW_DIGITAL = "show_digital"
 
 # روش‌های پرداخت (فعال/غیرفعال) و تنظیمات کریپتو
 S_PAY_CRYPTO_ENABLED = "pay_crypto_enabled"
@@ -180,6 +182,9 @@ class Service:
         self.db.seed_setting(S_V2RAY_INBOUND_ID, str(self.cfg.v2ray_inbound_id))
         self.db.seed_setting(S_V2RAY_PLAN_PRICE, str(self.cfg.v2ray_plan_price))
         self.db.seed_setting(S_V2RAY_PLAN_RESELLER_PRICE, str(self.cfg.v2ray_plan_reseller_price))
+        # نمایش/مخفی‌سازی بخش محصولات دیجیتال + محصولات پیش‌فرض
+        self.db.seed_setting(S_SHOW_DIGITAL, "1")
+        digital.seed_default_products(self.db)
 
     @property
     def server_ip(self) -> str:
@@ -373,6 +378,42 @@ class Service:
     @property
     def min_topup(self) -> float:
         return self._fsetting(S_MIN_TOPUP, self.cfg.min_topup)
+
+    # ------------------------------------------------------------------ #
+    #  محصولات دیجیتال (اکانت/اشتراک آماده)
+    # ------------------------------------------------------------------ #
+    @property
+    def digital_enabled(self) -> bool:
+        return self.feature_enabled(S_SHOW_DIGITAL)
+
+    def digital_price_toman(self, price_usd: float) -> float:
+        """قیمت دلاری محصول دیجیتال را به تومان (واحد کیف پول) تبدیل می‌کند."""
+        return round(float(price_usd) * self.toman_per_usd, 2)
+
+    def create_digital_order(self, tg_id: int, product_row) -> str:
+        """یک فاکتور پرداخت برای خرید محصول دیجیتال می‌سازد (روش پرداخت بعداً انتخاب می‌شود)."""
+        slug = product_row["slug"]
+        usd = round(float(product_row["price"]), 2)
+        return self.create_order_payment(
+            tg_id,
+            product=digital.meta_for_slug(slug),
+            usd=usd,
+            meta_extra={"digital_slug": slug, "title": product_row["title"]},
+        )
+
+    def deliver_digital(self, slug: str, buyer_tg_id: int, order_id: str) -> Optional[dict[str, Any]]:
+        """یک قلم از انبار محصول دیجیتال را به‌صورت اتمیک به خریدار تحویل می‌دهد.
+
+        اگر محصول پیدا نشد یا موجودی نبود None برمی‌گرداند. idempotent است:
+        اگر همین سفارش قبلاً قلمی گرفته باشد، همان قلم برگردانده می‌شود.
+        """
+        product = self.db.get_digital_product_by_slug(slug)
+        if product is None:
+            return None
+        item = self.db.claim_stock_item(int(product["id"]), buyer_tg_id, order_id)
+        if item is None:
+            return {"product": product, "item": None, "out_of_stock": True}
+        return {"product": product, "item": item, "out_of_stock": False}
 
     # --- پلن V2Ray ---
     @property

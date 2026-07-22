@@ -26,6 +26,49 @@ bash /opt/resibot/update.sh
 می‌شود. مهاجرت اسکیمای دیتابیس additive و با `PRAGMA user_version` است (نسخه ۲:
 کاربران/نقش‌ها، کیف پول، درخواست همکاری، پرداخت‌ها — بدون از دست رفتن داده‌ی قبلی).
 
+## تازه‌ها (نسخه‌ی اخیر)
+
+- **محصولات دیجیتال**: فروش اشتراک‌های آماده مثل **Gemini ۱۸ ماهه** و **ChatGPT Plus یک‌ماهه**
+  با تحویل خودکار از «انبار موجودی» بلافاصله پس از پرداخت. مشخصات، قیمت و **متن فروش**
+  هر محصول از پنل ادمین تلگرام و پنل وب کاملاً قابل ویرایش است.
+- **پنل وب مدیریتی امن (ضدنفوذ)**: افزودن/ویرایش محصولات، مدیریت انبار، قیمت‌ها، داشبورد آمار و
+  لاگ امنیتی — با ظاهر شیشه‌ای (glassmorphism). لایه‌های امنیتی: ورود با رمز هش‌شده (PBKDF2)،
+  سشن امضاشده‌ی HMAC، محافظت CSRF، قفل ضد brute-force، هدرهای امنیتی سخت‌گیرانه (CSP و ...)،
+  لیست سفید IP و لاگ کامل رخدادها.
+- **سخت‌سازی دیتابیس**: `busy_timeout`، `secure_delete`، `synchronous=NORMAL`، `trusted_schema=OFF`،
+  کلیدهای خارجی، کوئری‌های کاملاً پارامتری و **لاگ حسابرسی (audit_log)** برای رخدادهای حساس.
+- **ابزار DevOps و نگهداری**: `manage.sh` برای status/logs/backup/restore/health/update/webpass/audit
+  و حالت تعمیر از خط فرمان.
+
+### پنل وب
+
+پس از نصب، اگر `WEB_PANEL_PASSWORD` را تنظیم کرده باشید، پنل روی پورت `WEB_PANEL_PORT`
+(پیش‌فرض 8095) بالا می‌آید:
+
+```
+http://<IP-سرور>:8095/panel
+```
+
+برای ساخت رمز هش‌شده (تا رمز خام روی سرور ذخیره نشود):
+
+```bash
+bash /opt/resibot/manage.sh webpass
+```
+
+توصیه‌ی امنیتی: پنل را پشت HTTPS/فایروال بگذارید و `WEB_PANEL_ALLOWED_IPS` را ست کنید.
+
+### دستورهای نگهداری
+
+```bash
+bash /opt/resibot/manage.sh status       # وضعیت سرویس
+bash /opt/resibot/manage.sh health       # سلامت ربات و پنل وب
+bash /opt/resibot/manage.sh backup       # پشتیبان فوری (با چرخش نگهداری)
+bash /opt/resibot/manage.sh restore <f>  # بازگردانی از پشتیبان
+bash /opt/resibot/manage.sh audit        # ۳۰ رخداد امنیتی اخیر
+bash /opt/resibot/manage.sh maintenance on|off
+bash /opt/resibot/manage.sh update       # آپدیت امن (= update.sh)
+```
+
 ## امکانات
 
 - **باز برای همه**: هر کاربری می‌تواند سرویس بخرد، کیف پول شارژ کند و سرویس‌هایش را مدیریت کند.

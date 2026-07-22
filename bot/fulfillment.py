@@ -17,6 +17,7 @@ import logging
 from html import escape
 from typing import Any
 
+from . import digital
 from .config import Settings
 from .database import Database, PRODUCT_V2RAY
 from .utils import fmt_expiry, provision_message
@@ -103,6 +104,80 @@ async def send_v2ray_delivery(bot: Any, tg_id: int, info: dict[str, Any]) -> Non
     await _send_v2ray(bot, tg_id, info)
 
 
+async def _deliver_digital(
+    bot: Any, cfg: Settings, db: Database, service: Any, tg_id: int,
+    slug: str, usd: float, method_label: str, *, order_id: str,
+) -> bool:
+    """یک قلم از انبار محصول دیجیتال را تحویل می‌دهد و به کاربر/ادمین اطلاع می‌دهد.
+
+    True یعنی قلم با موفقیت تحویل شد. اگر موجودی تمام باشد، پول کاربر ثبت‌شده باقی
+    می‌ماند (پرداخت گم نمی‌شود) و به ادمین هشدار داده می‌شود تا دستی تحویل دهد.
+    """
+    result = service.deliver_digital(slug, tg_id, order_id)
+    if result is None:
+        # محصول دیگر وجود ندارد (مثلاً حذف شده) — هشدار به ادمین.
+        logger.warning("محصول دیجیتال %s برای تحویل پیدا نشد (order=%s)", slug, order_id)
+        try:
+            await bot.send_message(
+                cfg.admin_id,
+                f"⚠️ پرداخت <code>{escape(order_id)}</code> برای محصول دیجیتال "
+                f"<code>{escape(slug)}</code> تأیید شد ولی محصول پیدا نشد. دستی بررسی کنید.",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    product = result["product"]
+    title = product["title"]
+
+    if result["out_of_stock"] or result["item"] is None:
+        # موجودی تمام شده — به کاربر اطلاع می‌دهیم که تحویل دستی و به‌زودی انجام می‌شود.
+        try:
+            await bot.send_message(
+                tg_id,
+                "✅ پرداخت شما تأیید شد.\n"
+                f"🧩 محصول: <b>{escape(title)}</b>\n\n"
+                "⏳ موجودی این محصول همین حالا تمام شده، اما نگران نباشید — سفارش شما "
+                "ثبت شده و به‌صورت دستی و در سریع‌ترین زمان ممکن برایتان ارسال می‌شود. "
+                "اگر عجله دارید به پشتیبانی پیام بدهید.",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await bot.send_message(
+                cfg.admin_id,
+                "🛑 <b>موجودی تمام شد!</b>\n"
+                f"🧩 محصول: <b>{escape(title)}</b> (<code>{escape(slug)}</code>)\n"
+                f"👤 خریدار: <code>{tg_id}</code>\n"
+                f"🧾 سفارش: <code>{escape(order_id)}</code>\n"
+                f"💵 مبلغ: <b>{usd:g} USDT</b>\n"
+                "لطفاً این محصول را دستی تحویل دهید و انبار را شارژ کنید.",
+            )
+        except Exception:  # noqa: BLE001
+            pass
+        return False
+
+    payload = result["item"]["payload"]
+    duration = int(product["duration_days"] or 0)
+    duration_line = f"⏳ مدت اعتبار: <b>{duration} روز</b>\n" if duration else ""
+    try:
+        await bot.send_message(
+            tg_id,
+            "✅ <b>خرید شما با موفقیت انجام شد</b>\n\n"
+            f"🧩 محصول: <b>{escape(title)}</b>\n"
+            f"{duration_line}"
+            f"💳 روش پرداخت: {method_label}\n\n"
+            "🔐 <b>اطلاعات تحویل شما:</b>\n"
+            f"<code>{escape(payload)}</code>\n\n"
+            "لطفاً این اطلاعات را جای امنی ذخیره کنید. اگر در فعال‌سازی سؤالی داشتید، "
+            "به پشتیبانی پیام بدهید؛ کنارتان هستیم. 🌟",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("ارسال محصول دیجیتال به کاربر %s ناموفق بود", tg_id)
+    _notify_admin_sale(bot, cfg, tg_id, f"دیجیتال: {title}", usd, method_label)
+    return True
+
+
 async def deliver_paid_order(
     bot: Any, cfg: Settings, db: Database, service: Any, credited_row: Any
 ) -> None:
@@ -139,7 +214,13 @@ async def deliver_paid_order(
 
     delivered = False
     try:
-        if product == PRODUCT_V2RAY:
+        if digital.is_digital_meta(product):
+            slug = digital.slug_from_meta(product)
+            delivered = await _deliver_digital(
+                bot, cfg, db, service, tg_id, slug, usd, method_label,
+                order_id=str(credited_row["order_id"]),
+            )
+        elif product == PRODUCT_V2RAY:
             renew_id = meta.get("renew_config_id")
             if renew_id:
                 info = await service.renew_v2ray(int(renew_id), price=usd)
@@ -164,7 +245,10 @@ async def deliver_paid_order(
                 "✅ پرداخت شما تأیید شد و سرویس ساخته شد:\n\n" + provision_message(res),
             )
             _notify_admin_sale(bot, cfg, tg_id, f"رزیدنتال ({product})", usd, method_label)
-        delivered = True
+        # برای محصول دیجیتال، وضعیت تحویل را همان تابع اختصاصی تعیین کرده است؛
+        # برای بقیه محصولات اگر خطایی رخ نداده باشد یعنی تحویل موفق بوده.
+        if not digital.is_digital_meta(product):
+            delivered = True
     except Exception:  # noqa: BLE001
         logger.exception("ساخت سرویس پس از پرداخت ناموفق بود (order=%s)", credited_row["order_id"])
         try:

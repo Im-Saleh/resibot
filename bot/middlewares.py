@@ -20,12 +20,24 @@ class ThrottleMiddleware(BaseMiddleware):
     این جلوی حملات ساده‌ی flood و فشار روی پنل/شبکه را می‌گیرد.
     """
 
-    def __init__(self, cfg: Settings, *, limit: int = 8, window: float = 3.0) -> None:
+    def __init__(
+        self, cfg: Settings, db: "Database | None" = None,
+        *, limit: int = 8, window: float = 3.0,
+        cooldown_threshold: int = 4, cooldown: float = 20.0,
+    ) -> None:
         self.cfg = cfg
+        self.db = db
         self.limit = limit
         self.window = window
+        # اگر کاربری در یک بازه‌ی کوتاه چندبار پیاپی به سقف بخورد، مدتی «کول‌داون»
+        # می‌شود تا فشار سیل‌آسا (flood) روی پنل/شبکه کنترل شود.
+        self.cooldown_threshold = cooldown_threshold
+        self.cooldown = cooldown
         self._hits: dict[int, deque] = {}
         self._notified: dict[int, float] = {}
+        self._strikes: dict[int, int] = {}
+        self._cooldown_until: dict[int, float] = {}
+        self._audited: dict[int, float] = {}
 
     async def __call__(
         self,
@@ -38,12 +50,25 @@ class ThrottleMiddleware(BaseMiddleware):
             return await handler(event, data)
 
         now = time.monotonic()
+
+        # کاربر در حال کول‌داون؟ رویداد را دور می‌ریزیم.
+        cooldown_until = self._cooldown_until.get(user.id, 0.0)
+        if cooldown_until > now:
+            return None
+
         dq = self._hits.setdefault(user.id, deque())
         while dq and now - dq[0] > self.window:
             dq.popleft()
         dq.append(now)
 
         if len(dq) > self.limit:
+            # افزایش ضربه و اعمال کول‌داون در صورت تکرار
+            strikes = self._strikes.get(user.id, 0) + 1
+            self._strikes[user.id] = strikes
+            if strikes >= self.cooldown_threshold:
+                self._cooldown_until[user.id] = now + self.cooldown
+                self._strikes[user.id] = 0
+                self._audit_flood(user.id)
             # جلوگیری از اسپم هشدار: حداکثر هر ۵ ثانیه یک‌بار پیام می‌دهیم.
             last = self._notified.get(user.id, 0.0)
             if now - last > 5.0:
@@ -58,8 +83,23 @@ class ThrottleMiddleware(BaseMiddleware):
             # جلوگیری از رشد بی‌نهایت حافظه
             if len(self._hits) > 10000:
                 self._hits.clear()
+                self._strikes.clear()
+                self._cooldown_until.clear()
             return None
         return await handler(event, data)
+
+    def _audit_flood(self, uid: int) -> None:
+        """ثبت رخداد فلاد در لاگ حسابرسی (حداکثر هر ۶۰ ثانیه یک‌بار برای هر کاربر)."""
+        if self.db is None:
+            return
+        now = time.monotonic()
+        if now - self._audited.get(uid, 0.0) < 60.0:
+            return
+        self._audited[uid] = now
+        try:
+            self.db.audit("flood_cooldown", actor=str(uid), detail="throttle cooldown applied")
+        except Exception:  # noqa: BLE001
+            pass
 
 
 class ContextMiddleware(BaseMiddleware):
