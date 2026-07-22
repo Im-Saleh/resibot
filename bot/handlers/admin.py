@@ -91,17 +91,34 @@ def _panel_kb(db: Database) -> "object":
     return admin_panel_menu(pending, maintenance_on=maint)
 
 
+def _panel_header(db: Database, cfg: Settings) -> str:
+    pending = len(db.list_pending_requests())
+    maint = db.get_setting("maintenance_mode", "0") == "1"
+    dg = len(db.list_digital_products())
+    lines = [
+        "🛠 <b>پنل مدیریت</b>",
+        f"<i>{escape(cfg.brand_full)}</i>",
+        "",
+        f"👥 کاربران: <b>{db.count_users()}</b>   •   🧾 سرویس فعال: <b>{len(db.list_all_configs())}</b>",
+        f"🤖 محصولات دیجیتال: <b>{dg}</b>   •   🤝 درخواست باز: <b>{pending}</b>",
+    ]
+    if maint:
+        lines.append("\n🔧 <b>حالت تعمیر روشن است</b> — فقط شما دسترسی دارید.")
+    lines.append("\nیک بخش را انتخاب کنید:")
+    return "\n".join(lines)
+
+
 @router.message(F.text == "🛠 پنل مدیریت")
-async def panel_root(message: Message, state: FSMContext, db: Database) -> None:
+async def panel_root(message: Message, state: FSMContext, db: Database, cfg: Settings) -> None:
     await state.clear()
-    await message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=_panel_kb(db))
+    await message.answer(_panel_header(db, cfg), reply_markup=_panel_kb(db))
 
 
 @router.callback_query(F.data == "menu:admin")
-async def panel_root_cb(call: CallbackQuery, state: FSMContext, db: Database) -> None:
+async def panel_root_cb(call: CallbackQuery, state: FSMContext, db: Database, cfg: Settings) -> None:
     await state.clear()
     await call.answer()
-    await call.message.answer("🛠 <b>پنل مدیریت</b>", reply_markup=_panel_kb(db))
+    await call.message.answer(_panel_header(db, cfg), reply_markup=_panel_kb(db))
 
 
 @router.callback_query(F.data == "adm:report")
@@ -231,6 +248,7 @@ async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, ser
     action, tg_id = parts[1], int(parts[2])
     if action == "ban":
         db.set_banned(tg_id, True)
+        db.audit("user_ban", actor=str(call.from_user.id), detail=str(tg_id))
         await call.answer("کاربر مسدود شد.")
         try:
             await call.message.edit_text(
@@ -241,6 +259,7 @@ async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, ser
             pass
     elif action == "unban":
         db.set_banned(tg_id, False)
+        db.audit("user_unban", actor=str(call.from_user.id), detail=str(tg_id))
         await call.answer("رفع مسدودی شد.")
         try:
             await call.message.edit_text(
@@ -315,6 +334,87 @@ async def adm_backup(call: CallbackQuery, db: Database) -> None:
 
 
 # ====================================================================== #
+#  پنل وب مدیریتی
+# ====================================================================== #
+@router.callback_query(F.data == "adm:web")
+async def adm_web(call: CallbackQuery, cfg: Settings) -> None:
+    await call.answer()
+    scheme = "https" if (cfg.web_panel_cert_file and cfg.web_panel_key_file) else "http"
+    host = cfg.server_ip or "IP-سرور"
+    url = f"{scheme}://{host}:{cfg.web_panel_port}/panel"
+    if cfg.web_panel_active:
+        status = "🟢 فعال و در حال اجرا"
+        pass_note = "🔑 رمز عبور: تنظیم شده ✅"
+    elif cfg.web_panel_enabled and not cfg.web_panel_password:
+        status = "🟡 فعال ولی بدون رمز (بالا نمی‌آید)"
+        pass_note = "🔑 رمز عبور: <b>تنظیم نشده</b> — در فایل .env مقدار WEB_PANEL_PASSWORD را بگذارید."
+    else:
+        status = "🔴 غیرفعال"
+        pass_note = "برای فعال‌سازی WEB_PANEL_ENABLED=1 و WEB_PANEL_PASSWORD را در .env تنظیم کنید."
+    ip_note = (
+        f"🌐 IPهای مجاز: <code>{escape(cfg.web_panel_allowed_ips)}</code>"
+        if cfg.web_panel_allowed_ips else "🌐 IPهای مجاز: همه (توصیه: محدود کنید)"
+    )
+    await call.message.answer(
+        "🌐 <b>پنل وب مدیریتی</b>\n\n"
+        f"وضعیت: {status}\n"
+        f"🔗 آدرس: <code>{escape(url)}</code>\n"
+        f"{pass_note}\n"
+        f"{ip_note}\n\n"
+        "از این پنل می‌توانید محصولات دیجیتال را بسازید/ویرایش کنید، قیمت‌ها را تغییر "
+        "دهید، آمار را ببینید و لاگ امنیتی را بررسی کنید.\n\n"
+        "🛡 <b>امنیت:</b> ورود با رمز، سشن امضاشده، محافظت CSRF، قفل ضدحمله‌ی brute-force، "
+        "هدرهای امنیتی و لاگ کامل رخدادها فعال است.\n"
+        "💡 توصیه: پورت پنل را پشت HTTPS و فایروال قرار دهید و لیست IP مجاز را ست کنید.",
+        reply_markup=back_to_panel_kb(),
+    )
+
+
+# ====================================================================== #
+#  لاگ امنیتی (حسابرسی)
+# ====================================================================== #
+_AUDIT_LABEL = {
+    "web_login_ok": "✅ ورود موفق پنل وب",
+    "web_login_fail": "⛔️ ورود ناموفق پنل وب",
+    "web_login_locked": "🔒 قفل ورود (brute-force)",
+    "web_ip_blocked": "🚫 IP مسدود",
+    "web_logout": "🚪 خروج پنل وب",
+    "web_product_create": "🆕 محصول جدید (وب)",
+    "web_product_edit": "✏️ ویرایش محصول (وب)",
+    "web_product_delete": "🗑 حذف محصول (وب)",
+    "web_stock_add": "📦 افزودن موجودی (وب)",
+    "web_prices_edit": "💵 تغییر قیمت‌ها (وب)",
+    "digital_product_create": "🆕 محصول جدید (ربات)",
+    "digital_product_edit": "✏️ ویرایش محصول (ربات)",
+    "digital_product_delete": "🗑 حذف محصول (ربات)",
+    "digital_product_toggle": "🔀 تغییر وضعیت محصول",
+    "digital_stock_add": "📦 افزودن موجودی (ربات)",
+    "digital_stock_clear": "🧹 خالی‌کردن انبار",
+}
+
+
+@router.callback_query(F.data == "adm:audit")
+async def adm_audit(call: CallbackQuery, db: Database) -> None:
+    import datetime as _dt
+    await call.answer()
+    rows = db.list_audit(limit=25)
+    if not rows:
+        await call.message.answer("هنوز رخداد امنیتی‌ای ثبت نشده است.", reply_markup=back_to_panel_kb())
+        return
+    lines = ["🛡 <b>۲۵ رخداد امنیتی اخیر</b>", ""]
+    for r in rows:
+        try:
+            ts = _dt.datetime.fromtimestamp(int(r["ts"])).strftime("%m-%d %H:%M")
+        except (ValueError, OverflowError, OSError):
+            ts = "—"
+        label = _AUDIT_LABEL.get(r["action"], r["action"])
+        ip = f" • <code>{escape(r['ip'])}</code>" if r["ip"] else ""
+        detail = f" • {escape(r['detail'])}" if r["detail"] else ""
+        lines.append(f"<code>{ts}</code> {label}{ip}{detail}")
+    await call.message.answer("\n".join(lines), reply_markup=back_to_panel_kb())
+
+
+# ====================================================================== #
 #  حالت تعمیر
 # ====================================================================== #
 @router.callback_query(F.data == "adm:maint")
@@ -322,6 +422,7 @@ async def adm_maint(call: CallbackQuery, db: Database) -> None:
     cur = db.get_setting("maintenance_mode", "0") == "1"
     new_val = not cur
     db.set_setting("maintenance_mode", "1" if new_val else "0")
+    db.audit("maintenance_toggle", actor=str(call.from_user.id), detail="on" if new_val else "off")
     await call.answer(
         "🔧 حالت تعمیر روشن شد (فقط ادمین دسترسی دارد)." if new_val else "🟢 حالت تعمیر خاموش شد.",
         show_alert=True,
@@ -470,6 +571,7 @@ async def set_role_cb(call: CallbackQuery, db: Database) -> None:
         return
     tg_id = int(tg_s)
     db.set_role(tg_id, role)
+    db.audit("role_change", actor=str(call.from_user.id), detail=f"{tg_id} -> {role}")
     await call.answer("نقش تنظیم شد.")
     await call.message.edit_text(f"✅ نقش کاربر <code>{tg_id}</code> به <b>{ROLE_LABEL[role]}</b> تغییر کرد.")
     try:
@@ -511,6 +613,7 @@ async def credit_amount(message: Message, state: FSMContext, db: Database, servi
     await state.clear()
     tg_id = int(data.get("credit_id", 0))
     new_bal = db.add_balance(tg_id, amount)
+    db.audit("manual_credit", actor=str(message.from_user.id), detail=f"{tg_id} {amount:+g}")
     await message.answer(
         f"✅ کیف پول <code>{tg_id}</code> به‌روزرسانی شد.\n"
         f"💰 موجودی فعلی: <b>{new_bal:g} {service.currency}</b>"
@@ -546,6 +649,7 @@ async def do_broadcast(message: Message, state: FSMContext, db: Database) -> Non
         await message.answer("⛔️ متن خالی است.")
         return
     user_ids = db.all_user_ids()
+    db.audit("broadcast", actor=str(message.from_user.id), detail=f"to {len(user_ids)} users")
     await message.answer(f"⏳ در حال ارسال به <b>{len(user_ids)}</b> کاربر...")
     ok = 0
     fail = 0

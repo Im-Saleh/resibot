@@ -191,6 +191,27 @@ class Settings:
     # دیتابیس
     db_path: str = field(default_factory=lambda: _get("DB_PATH", "data/resibot.db"))
 
+    # --- پنل وب مدیریتی (aiohttp) ---
+    # فعال‌سازی پنل وب. اگر پسورد ست نشده باشد، حتی اگر روشن باشد بالا نمی‌آید.
+    web_panel_enabled: bool = field(default_factory=lambda: _get_bool("WEB_PANEL_ENABLED", True))
+    web_panel_host: str = field(default_factory=lambda: _get("WEB_PANEL_HOST", "0.0.0.0"))
+    web_panel_port: int = field(default_factory=lambda: _get_int("WEB_PANEL_PORT", 8095))
+    # پسورد ورود پنل وب. توصیه: از install.sh یک مقدار قوی بگیرید.
+    web_panel_password: str = field(default_factory=lambda: _get("WEB_PANEL_PASSWORD"))
+    # کلید مخفی برای امضای سشن‌ها؛ اگر خالی باشد خودکار ساخته می‌شود (هر ری‌استارت
+    # همه را logout می‌کند). برای پایداری سشن، مقدار ثابتی در .env بگذارید.
+    web_panel_secret: str = field(default_factory=lambda: _get("WEB_PANEL_SECRET"))
+    # اختیاری: HTTPS برای پنل وب (توصیه‌شده). می‌توانید همان گواهی پنل را بدهید.
+    web_panel_cert_file: str = field(default_factory=lambda: _get("WEB_PANEL_CERT_FILE"))
+    web_panel_key_file: str = field(default_factory=lambda: _get("WEB_PANEL_KEY_FILE"))
+    # لیست IPهای مجاز (جداشده با کاما)؛ خالی یعنی همه مجازند.
+    web_panel_allowed_ips: str = field(default_factory=lambda: _get("WEB_PANEL_ALLOWED_IPS"))
+
+    @property
+    def web_panel_active(self) -> bool:
+        """پنل وب فقط وقتی بالا می‌آید که فعال و دارای پسورد باشد."""
+        return bool(self.web_panel_enabled and self.web_panel_password)
+
     @property
     def nowpayments_enabled(self) -> bool:
         # فقط دو کلید لازم است؛ آدرس IPN خودکار ساخته می‌شود.

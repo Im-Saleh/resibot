@@ -102,29 +102,30 @@ async def cmd_id(message: Message) -> None:
 # ---------------------------------------------------------------------- #
 #  منوی محصولات
 # ---------------------------------------------------------------------- #
-async def _send_products(target: Message, state: FSMContext, service: Service) -> None:
+async def _send_products(target: Message, state: FSMContext, service: Service, db: Database) -> None:
     await state.clear()
     res = service.product_enabled(PRODUCT_RESIDENTIAL)
     res2 = service.product_enabled(PRODUCT_RESIDENTIAL2)
     v2 = service.product_enabled(PRODUCT_V2RAY)
-    if not (res or res2 or v2):
+    dig = service.digital_enabled and bool(db.list_digital_products(active_only=True))
+    if not (res or res2 or v2 or dig):
         await target.answer("در حال حاضر هیچ محصولی برای فروش فعال نیست.")
         return
     await target.answer(
         "🛍 <b>محصولات</b>\nیکی از سرویس‌های زیر را انتخاب کنید:",
-        reply_markup=products_menu(residential=res, residential2=res2, v2ray=v2),
+        reply_markup=products_menu(residential=res, residential2=res2, v2ray=v2, digital=dig),
     )
 
 
 @router.callback_query(F.data == "menu:buy")
-async def menu_buy(call: CallbackQuery, state: FSMContext, service: Service) -> None:
+async def menu_buy(call: CallbackQuery, state: FSMContext, service: Service, db: Database) -> None:
     await call.answer()
-    await _send_products(call.message, state, service)
+    await _send_products(call.message, state, service, db)
 
 
 @router.message(F.text == "🛒 خرید سرویس")
-async def show_products(message: Message, state: FSMContext, service: Service) -> None:
-    await _send_products(message, state, service)
+async def show_products(message: Message, state: FSMContext, service: Service, db: Database) -> None:
+    await _send_products(message, state, service, db)
 
 
 GUIDE_TEXT = (

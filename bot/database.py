@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 # آخرین نسخه‌ی اسکیما. هر بار که مهاجرت جدید اضافه می‌شود، این عدد زیاد می‌شود.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # نقش‌های کاربری
 ROLE_ADMIN = "admin"
@@ -30,6 +30,7 @@ ROLE_USER = "user"
 PRODUCT_RESIDENTIAL = "residential"       # رزیدنتال (SmartProxy)
 PRODUCT_RESIDENTIAL2 = "residential2"     # رزیدنتال ۲ (IPRoyal)
 PRODUCT_V2RAY = "v2ray"
+PRODUCT_DIGITAL = "digital"               # محصولات دیجیتال (اکانت/اشتراک آماده)
 
 
 class Database:
@@ -40,8 +41,23 @@ class Database:
         # check_same_thread=False چون با قفل خودمان همگام‌سازی می‌کنیم
         self._conn = sqlite3.connect(str(self.path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        # --- سخت‌سازی امنیتی/پایداری دیتابیس ---
+        # journal_mode=WAL: هم‌زمانی خواندن/نوشتن بهتر و مقاومت در برابر خرابی.
         self._conn.execute("PRAGMA journal_mode=WAL;")
+        # foreign_keys=ON: یکپارچگی ارجاعی (جلوی داده‌ی یتیم و ناسازگار را می‌گیرد).
         self._conn.execute("PRAGMA foreign_keys=ON;")
+        # busy_timeout: به‌جای خطای فوری «database is locked»، تا ۵ ثانیه صبر می‌کند.
+        self._conn.execute("PRAGMA busy_timeout=5000;")
+        # secure_delete: هنگام حذف، بایت‌های داده صفر می‌شوند تا روی دیسک باقی نماند
+        # (اهمیت برای داده‌ی حساس مثل اکانت‌های تحویل‌شده).
+        self._conn.execute("PRAGMA secure_delete=ON;")
+        # synchronous=NORMAL: تعادل ایمن بین سرعت و دوام داده در حالت WAL.
+        self._conn.execute("PRAGMA synchronous=NORMAL;")
+        # trusted_schema=OFF: جلوگیری از اجرای توابع/ویوهای مخرب از داخل اسکیما.
+        try:
+            self._conn.execute("PRAGMA trusted_schema=OFF;")
+        except sqlite3.Error:
+            pass  # نسخه‌های قدیمی SQLite این PRAGMA را ندارند
         self._migrate()
 
     # ------------------------------------------------------------------ #
@@ -66,6 +82,8 @@ class Database:
                 self._migrate_v6()
             if current < 7:
                 self._migrate_v7()
+            if current < 8:
+                self._migrate_v8()
 
             # نسخه را به‌روز می‌کنیم
             self._conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION};")
@@ -266,6 +284,248 @@ class Database:
             self._conn.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER NOT NULL DEFAULT 0")
         self._conn.execute("CREATE INDEX IF NOT EXISTS idx_payments_created ON payments(created_at)")
         self._conn.commit()
+
+    def _migrate_v8(self) -> None:
+        """محصولات دیجیتال (اکانت/اشتراک آماده) + انبار موجودی + لاگ حسابرسی.
+
+        همه‌ی تغییرات additive هستند و هیچ داده‌ی قبلی پاک نمی‌شود.
+          - digital_products : تعریف محصول (عنوان، متن فروش، قیمت، وضعیت) — قابل
+                               ویرایش از ربات و پنل وب.
+          - digital_stock    : اقلام آماده‌ی تحویل (اکانت/کد)؛ پس از پرداخت یکی
+                               به‌صورت اتمیک به خریدار تخصیص می‌یابد.
+          - audit_log        : ثبت رخدادهای حساس (ورود پنل وب، تغییر محصول، ...)
+                               برای ردیابی و امنیت.
+        """
+        c = self._conn
+        c.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS digital_products (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                slug          TEXT UNIQUE NOT NULL,
+                title         TEXT NOT NULL,
+                subtitle      TEXT NOT NULL DEFAULT '',
+                description   TEXT NOT NULL DEFAULT '',
+                price         REAL NOT NULL DEFAULT 0,
+                currency      TEXT NOT NULL DEFAULT 'USD',
+                duration_days INTEGER NOT NULL DEFAULT 0,
+                delivery_type TEXT NOT NULL DEFAULT 'stock',
+                active        INTEGER NOT NULL DEFAULT 1,
+                sort_order    INTEGER NOT NULL DEFAULT 0,
+                created_at    INTEGER NOT NULL,
+                updated_at    INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS digital_stock (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id   INTEGER NOT NULL,
+                payload      TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'available',
+                buyer_tg_id  INTEGER NOT NULL DEFAULT 0,
+                order_id     TEXT NOT NULL DEFAULT '',
+                sold_at      INTEGER NOT NULL DEFAULT 0,
+                created_at   INTEGER NOT NULL,
+                FOREIGN KEY(product_id) REFERENCES digital_products(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_stock_product ON digital_stock(product_id, status);
+
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts      INTEGER NOT NULL,
+                actor   TEXT NOT NULL DEFAULT '',
+                ip      TEXT NOT NULL DEFAULT '',
+                action  TEXT NOT NULL DEFAULT '',
+                detail  TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
+            """
+        )
+        c.commit()
+
+    # ------------------------------------------------------------------ #
+    # محصولات دیجیتال
+    # ------------------------------------------------------------------ #
+    _DIGITAL_UPDATABLE = frozenset({
+        "title", "subtitle", "description", "price", "currency",
+        "duration_days", "delivery_type", "active", "sort_order",
+    })
+
+    def create_digital_product(
+        self,
+        slug: str,
+        title: str,
+        *,
+        subtitle: str = "",
+        description: str = "",
+        price: float = 0.0,
+        currency: str = "USD",
+        duration_days: int = 0,
+        delivery_type: str = "stock",
+        active: bool = True,
+        sort_order: int = 0,
+    ) -> int:
+        now = int(time.time())
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO digital_products("
+                "slug, title, subtitle, description, price, currency, duration_days, "
+                "delivery_type, active, sort_order, created_at, updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    slug, title, subtitle, description, float(price), currency,
+                    int(duration_days), delivery_type, 1 if active else 0,
+                    int(sort_order), now, now,
+                ),
+            )
+            self._conn.commit()
+            return int(cur.lastrowid)
+
+    def seed_digital_product(self, slug: str, **kwargs: Any) -> Optional[int]:
+        """اگر محصولی با این slug نباشد، آن را می‌سازد (idempotent). id یا None."""
+        if self.get_digital_product_by_slug(slug) is not None:
+            return None
+        return self.create_digital_product(slug, kwargs.pop("title", slug), **kwargs)
+
+    def update_digital_product(self, product_id: int, **fields: Any) -> None:
+        cols = [k for k in fields if k in self._DIGITAL_UPDATABLE]
+        if not cols:
+            return
+        set_clause = ", ".join(f"{c} = ?" for c in cols) + ", updated_at = ?"
+        params = [fields[c] for c in cols] + [int(time.time()), int(product_id)]
+        self.execute(f"UPDATE digital_products SET {set_clause} WHERE id = ?", params)
+
+    def get_digital_product(self, product_id: int) -> Optional[sqlite3.Row]:
+        return self.query_one("SELECT * FROM digital_products WHERE id = ?", (int(product_id),))
+
+    def get_digital_product_by_slug(self, slug: str) -> Optional[sqlite3.Row]:
+        return self.query_one("SELECT * FROM digital_products WHERE slug = ?", (slug,))
+
+    def list_digital_products(self, *, active_only: bool = False) -> list[sqlite3.Row]:
+        if active_only:
+            return self.query_all(
+                "SELECT * FROM digital_products WHERE active = 1 "
+                "ORDER BY sort_order ASC, id ASC"
+            )
+        return self.query_all(
+            "SELECT * FROM digital_products ORDER BY sort_order ASC, id ASC"
+        )
+
+    def delete_digital_product(self, product_id: int) -> None:
+        self.execute("DELETE FROM digital_products WHERE id = ?", (int(product_id),))
+
+    # --- انبار موجودی محصولات دیجیتال ---
+    def add_stock_items(self, product_id: int, payloads: Iterable[str]) -> int:
+        """چند قلم موجودی برای یک محصول اضافه می‌کند. تعداد اقلام اضافه‌شده را برمی‌گرداند."""
+        now = int(time.time())
+        count = 0
+        with self._lock:
+            for p in payloads:
+                p = (p or "").strip()
+                if not p:
+                    continue
+                self._conn.execute(
+                    "INSERT INTO digital_stock(product_id, payload, status, created_at) "
+                    "VALUES(?, ?, 'available', ?)",
+                    (int(product_id), p, now),
+                )
+                count += 1
+            self._conn.commit()
+        return count
+
+    def count_available_stock(self, product_id: int) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS c FROM digital_stock WHERE product_id = ? AND status = 'available'",
+            (int(product_id),),
+        )
+        return int(row["c"]) if row else 0
+
+    def stock_counts(self) -> dict[int, int]:
+        """تعداد موجودی آماده‌ی هر محصول را برمی‌گرداند: {product_id: count}."""
+        rows = self.query_all(
+            "SELECT product_id, COUNT(*) AS c FROM digital_stock "
+            "WHERE status = 'available' GROUP BY product_id"
+        )
+        return {int(r["product_id"]): int(r["c"]) for r in rows}
+
+    def claim_stock_item(self, product_id: int, buyer_tg_id: int, order_id: str) -> Optional[sqlite3.Row]:
+        """به‌صورت اتمیک یک قلم موجودی را به خریدار تخصیص می‌دهد.
+
+        اگر همین سفارش قبلاً قلمی گرفته باشد، همان را برمی‌گرداند (idempotent).
+        اگر موجودی نباشد None برمی‌گرداند.
+        """
+        with self._lock:
+            # اگر این سفارش قبلاً قلمی دریافت کرده، همان را بده (جلوگیری از تحویل دوباره).
+            existing = self._conn.execute(
+                "SELECT * FROM digital_stock WHERE order_id = ? AND order_id != '' LIMIT 1",
+                (order_id,),
+            ).fetchone()
+            if existing is not None:
+                return existing
+            row = self._conn.execute(
+                "SELECT id FROM digital_stock WHERE product_id = ? AND status = 'available' "
+                "ORDER BY id ASC LIMIT 1",
+                (int(product_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            item_id = int(row["id"])
+            cur = self._conn.execute(
+                "UPDATE digital_stock SET status = 'sold', buyer_tg_id = ?, order_id = ?, "
+                "sold_at = ? WHERE id = ? AND status = 'available'",
+                (int(buyer_tg_id), order_id, int(time.time()), item_id),
+            )
+            self._conn.commit()
+            if cur.rowcount <= 0:
+                return None
+            return self._conn.execute(
+                "SELECT * FROM digital_stock WHERE id = ?", (item_id,)
+            ).fetchone()
+
+    def list_stock(self, product_id: int, *, limit: int = 50) -> list[sqlite3.Row]:
+        return self.query_all(
+            "SELECT * FROM digital_stock WHERE product_id = ? ORDER BY id DESC LIMIT ?",
+            (int(product_id), int(limit)),
+        )
+
+    def clear_available_stock(self, product_id: int) -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM digital_stock WHERE product_id = ? AND status = 'available'",
+                (int(product_id),),
+            )
+            self._conn.commit()
+            return cur.rowcount
+
+    def count_digital_sales(self, product_id: int) -> int:
+        row = self.query_one(
+            "SELECT COUNT(*) AS c FROM digital_stock WHERE product_id = ? AND status = 'sold'",
+            (int(product_id),),
+        )
+        return int(row["c"]) if row else 0
+
+    # ------------------------------------------------------------------ #
+    # لاگ حسابرسی (رخدادهای حساس)
+    # ------------------------------------------------------------------ #
+    def audit(self, action: str, *, actor: str = "", ip: str = "", detail: str = "") -> None:
+        try:
+            self.execute(
+                "INSERT INTO audit_log(ts, actor, ip, action, detail) VALUES(?,?,?,?,?)",
+                (int(time.time()), str(actor)[:64], str(ip)[:64], str(action)[:64], str(detail)[:500]),
+            )
+        except sqlite3.Error:
+            pass  # لاگ‌گیری هرگز نباید مسیر اصلی را متوقف کند
+
+    def list_audit(self, limit: int = 50) -> list[sqlite3.Row]:
+        return self.query_all(
+            "SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (int(limit),)
+        )
+
+    def prune_audit(self, keep: int = 5000) -> None:
+        """لاگ‌های قدیمی را هرس می‌کند تا جدول بی‌نهایت رشد نکند."""
+        self.execute(
+            "DELETE FROM audit_log WHERE id NOT IN "
+            "(SELECT id FROM audit_log ORDER BY id DESC LIMIT ?)",
+            (int(keep),),
+        )
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> sqlite3.Cursor:
         with self._lock:
