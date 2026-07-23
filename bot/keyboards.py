@@ -533,12 +533,17 @@ def admin_panel_menu(pending_count: int = 0, *, maintenance_on: bool = False) ->
     )
 
 
-def user_actions_kb(tg_id: int, *, banned: bool) -> InlineKeyboardMarkup:
+def user_actions_kb(tg_id: int, *, banned: bool, is_admin: bool = False) -> InlineKeyboardMarkup:
     """کیبورد اقدامات روی یک کاربر مشخص (پروفایل/مدیریت کاربر)."""
     ban_btn = (
         InlineKeyboardButton(text="✅ رفع مسدودی", callback_data=f"uinfo:unban:{tg_id}")
         if banned else
         InlineKeyboardButton(text="🚫 مسدود کردن", callback_data=f"uinfo:ban:{tg_id}")
+    )
+    admin_btn = (
+        InlineKeyboardButton(text="⬇️ حذف از ادمین", callback_data=f"uinfo:rmadmin:{tg_id}")
+        if is_admin else
+        InlineKeyboardButton(text="👑 ادمین‌کردن", callback_data=f"uinfo:mkadmin:{tg_id}")
     )
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -549,6 +554,10 @@ def user_actions_kb(tg_id: int, *, banned: bool) -> InlineKeyboardMarkup:
             [
                 ban_btn,
                 InlineKeyboardButton(text="🏷 تخفیف", callback_data=f"disc:{tg_id}:all"),
+            ],
+            [
+                InlineKeyboardButton(text="✉️ پیام مستقیم", callback_data=f"uinfo:dm:{tg_id}"),
+                admin_btn,
             ],
             _panel_row(),
         ]
@@ -673,9 +682,23 @@ def users_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🛡 لیست همکاران v2ray", callback_data="usr:list_v2")],
             [InlineKeyboardButton(text="🔎 پروفایل/مدیریت کاربر", callback_data="adm:userinfo")],
             [InlineKeyboardButton(text="✏️ تعیین نقش با آیدی", callback_data="usr:setrole")],
+            [InlineKeyboardButton(text="👑 مدیریت ادمین‌ها", callback_data="adm:admins")],
             _panel_row(),
         ]
     )
+
+
+def admins_menu(admin_ids: list[int], main_admin_id: int = 0) -> InlineKeyboardMarkup:
+    """مدیریت ادمین‌های اضافه: افزودن با آیدی و حذف هر ادمین."""
+    kb: list[list[InlineKeyboardButton]] = [
+        [InlineKeyboardButton(text="➕ افزودن ادمین با آیدی", callback_data="adm:addadmin")],
+    ]
+    for aid in admin_ids:
+        kb.append([
+            InlineKeyboardButton(text=f"⬇️ حذف {aid}", callback_data=f"adm:rmadmin:{aid}"),
+        ])
+    kb.append(_panel_row())
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
 def users_list_keyboard(rows: list, *, page: int, has_next: bool, currency: str = "") -> InlineKeyboardMarkup:

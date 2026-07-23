@@ -19,7 +19,9 @@ from ..database import (
 )
 from ..crypto import is_valid_address
 from ..keyboards import (
+    _panel_row,
     admin_panel_menu,
+    admins_menu,
     back_to_panel_kb,
     configs_list_keyboard,
     custbot_menu,
@@ -73,7 +75,7 @@ from ..service import (
     S_V2RAY_RESELLER_PRICE,
     Service,
 )
-from ..states import AdminStates
+from ..states import AdminDMStates, AdminStates
 
 logger = logging.getLogger("resibot.admin")
 router = Router(name="admin")
@@ -153,12 +155,19 @@ async def adm_userinfo(call: CallbackQuery, state: FSMContext) -> None:
     await call.message.answer("🔎 آیدی عددی کاربر را بفرستید تا پروفایلش را ببینید:")
 
 
-def _user_profile_text(db: Database, service: Service, tg_id: int) -> str:
+def _is_admin_user(db: Database, cfg: Settings, tg_id: int) -> bool:
+    """آیا این کاربر ادمین است (ادمین اصلی env یا ادمین اضافه‌شده)."""
+    return int(tg_id) == int(cfg.admin_id) or db.is_extra_admin(tg_id)
+
+
+def _user_profile_text(db: Database, service: Service, tg_id: int, cfg: Settings | None = None) -> str:
     row = db.get_user(tg_id)
     if not row:
         return f"کاربر <code>{tg_id}</code> در دیتابیس پیدا نشد (هنوز /start نزده)."
     role = row["role"] if row else "user"
     role_label = ROLE_LABEL.get(role, "کاربر عادی") if role != "admin" else "ادمین"
+    if cfg is not None and _is_admin_user(db, cfg, tg_id):
+        role_label = "👑 ادمین"
     banned = "🚫 بله" if db.is_banned(tg_id) else "خیر"
     ref_by = db.get_referrer(tg_id)
     lines = [
@@ -168,6 +177,28 @@ def _user_profile_text(db: Database, service: Service, tg_id: int) -> str:
         f"• موجودی: <b>{float(row['balance']):g} {service.currency}</b>",
         f"• مسدود: {banned}",
         f"• تعداد سرویس فعال: <b>{db.count_configs(tg_id)}</b>",
+    ]
+    # خلاصه‌ی خرید کاربر: مجموع پرداخت‌های موفق + تعداد سرویس/محصول خریداری‌شده
+    try:
+        summary = db.user_purchase_summary(tg_id)
+    except Exception:  # noqa: BLE001
+        summary = None
+    if summary:
+        if summary["by_currency"]:
+            paid_str = "، ".join(
+                f"{c['sum']:g} {escape(c['currency'])}" for c in summary["by_currency"]
+            )
+        else:
+            paid_str = "—"
+        lines.append(
+            f"• مجموع خرید (پرداخت موفق): <b>{paid_str}</b>"
+            f" ({summary['paid_count']} تراکنش)"
+        )
+        lines.append(
+            f"• سرویس خریداری‌شده: <b>{summary['configs']}</b>"
+            f"   •   محصول دیجیتال: <b>{summary['digital']}</b>"
+        )
+    lines += [
         f"• معرف (دعوت‌کننده): {('<code>'+str(ref_by)+'</code>') if ref_by else '—'}",
         f"• تعداد دعوت‌شده‌ها: <b>{db.count_referrals(tg_id)}</b>",
         f"• درآمد رفرال: <b>{db.ref_earnings(tg_id):g} {service.currency}</b>",
@@ -182,7 +213,7 @@ def _user_profile_text(db: Database, service: Service, tg_id: int) -> str:
 
 
 @router.message(AdminStates.userinfo_id)
-async def userinfo_id(message: Message, state: FSMContext, db: Database, service: Service) -> None:
+async def userinfo_id(message: Message, state: FSMContext, db: Database, service: Service, cfg: Settings) -> None:
     text = (message.text or "").strip()
     if not text.isdigit():
         await message.answer("⛔️ آیدی باید عددی باشد.")
@@ -190,8 +221,10 @@ async def userinfo_id(message: Message, state: FSMContext, db: Database, service
     await state.clear()
     tg_id = int(text)
     await message.answer(
-        _user_profile_text(db, service, tg_id),
-        reply_markup=user_actions_kb(tg_id, banned=db.is_banned(tg_id)),
+        _user_profile_text(db, service, tg_id, cfg),
+        reply_markup=user_actions_kb(
+            tg_id, banned=db.is_banned(tg_id), is_admin=_is_admin_user(db, cfg, tg_id)
+        ),
     )
 
 
@@ -229,7 +262,7 @@ async def adm_allusers(call: CallbackQuery, db: Database, service: Service) -> N
 
 
 @router.callback_query(F.data.startswith("uopen:"))
-async def uopen(call: CallbackQuery, db: Database, service: Service) -> None:
+async def uopen(call: CallbackQuery, db: Database, service: Service, cfg: Settings) -> None:
     parts = call.data.split(":")
     if len(parts) != 2 or not parts[1].isdigit():
         await call.answer("نامعتبر", show_alert=True)
@@ -237,27 +270,32 @@ async def uopen(call: CallbackQuery, db: Database, service: Service) -> None:
     tg_id = int(parts[1])
     await call.answer()
     await call.message.answer(
-        _user_profile_text(db, service, tg_id),
-        reply_markup=user_actions_kb(tg_id, banned=db.is_banned(tg_id)),
+        _user_profile_text(db, service, tg_id, cfg),
+        reply_markup=user_actions_kb(
+            tg_id, banned=db.is_banned(tg_id), is_admin=_is_admin_user(db, cfg, tg_id)
+        ),
     )
 
 
 @router.callback_query(F.data.startswith("uinfo:"))
-async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, service: Service) -> None:
+async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, service: Service, cfg: Settings) -> None:
     parts = call.data.split(":")
     if len(parts) != 3 or not parts[2].isdigit():
         await call.answer("نامعتبر", show_alert=True)
         return
     action, tg_id = parts[1], int(parts[2])
+
+    def _kb():
+        return user_actions_kb(
+            tg_id, banned=db.is_banned(tg_id), is_admin=_is_admin_user(db, cfg, tg_id)
+        )
+
     if action == "ban":
         db.set_banned(tg_id, True)
         db.audit("user_ban", actor=str(call.from_user.id), detail=str(tg_id))
         await call.answer("کاربر مسدود شد.")
         try:
-            await call.message.edit_text(
-                _user_profile_text(db, service, tg_id),
-                reply_markup=user_actions_kb(tg_id, banned=True),
-            )
+            await call.message.edit_text(_user_profile_text(db, service, tg_id, cfg), reply_markup=_kb())
         except Exception:  # noqa: BLE001
             pass
     elif action == "unban":
@@ -265,10 +303,7 @@ async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, ser
         db.audit("user_unban", actor=str(call.from_user.id), detail=str(tg_id))
         await call.answer("رفع مسدودی شد.")
         try:
-            await call.message.edit_text(
-                _user_profile_text(db, service, tg_id),
-                reply_markup=user_actions_kb(tg_id, banned=False),
-            )
+            await call.message.edit_text(_user_profile_text(db, service, tg_id, cfg), reply_markup=_kb())
         except Exception:  # noqa: BLE001
             pass
     elif action == "role":
@@ -284,8 +319,68 @@ async def uinfo_action(call: CallbackQuery, state: FSMContext, db: Database, ser
         await call.message.answer(
             f"مبلغ تغییر موجودی برای <code>{tg_id}</code> را وارد کنید (منفی = کسر):"
         )
+    elif action == "dm":
+        await state.set_state(AdminDMStates.message_text)
+        await state.update_data(dm_target=tg_id)
+        await call.answer()
+        await call.message.answer(
+            f"✉️ متن پیامی که می‌خواهید مستقیم برای <code>{tg_id}</code> ارسال شود را بفرستید.\n"
+            "(برای لغو /start بزنید)"
+        )
+    elif action == "mkadmin":
+        if _is_admin_user(db, cfg, tg_id):
+            await call.answer("این کاربر از قبل ادمین است.", show_alert=True)
+            return
+        db.add_extra_admin(tg_id)
+        db.audit("admin_add", actor=str(call.from_user.id), detail=str(tg_id))
+        await call.answer("✅ کاربر ادمین شد.", show_alert=True)
+        try:
+            await call.message.edit_text(_user_profile_text(db, service, tg_id, cfg), reply_markup=_kb())
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await call.bot.send_message(tg_id, "👑 شما به‌عنوان ادمین ربات تعیین شدید. برای دیدن پنل /start را بزنید.")
+        except Exception:  # noqa: BLE001
+            pass
+    elif action == "rmadmin":
+        if int(tg_id) == int(cfg.admin_id):
+            await call.answer("⛔️ ادمین اصلی قابل حذف نیست.", show_alert=True)
+            return
+        removed = db.remove_extra_admin(tg_id)
+        db.audit("admin_remove", actor=str(call.from_user.id), detail=str(tg_id))
+        await call.answer("✅ از ادمین حذف شد." if removed else "این کاربر ادمین نبود.", show_alert=True)
+        try:
+            await call.message.edit_text(_user_profile_text(db, service, tg_id, cfg), reply_markup=_kb())
+        except Exception:  # noqa: BLE001
+            pass
     else:
         await call.answer("نامعتبر", show_alert=True)
+
+
+@router.message(AdminDMStates.message_text)
+async def admin_dm_send(message: Message, state: FSMContext, db: Database) -> None:
+    data = await state.get_data()
+    await state.clear()
+    target = int(data.get("dm_target", 0))
+    if not target:
+        await message.answer("⛔️ مقصد پیام نامعتبر است.", reply_markup=back_to_panel_kb())
+        return
+    text = message.html_text if message.text else (message.caption or "")
+    if not text:
+        await message.answer("⛔️ متن پیام خالی است.")
+        return
+    try:
+        await message.bot.send_message(target, text)
+        db.audit("admin_dm", actor=str(message.from_user.id), detail=str(target))
+        await message.answer(
+            f"✅ پیام برای <code>{target}</code> ارسال شد.", reply_markup=back_to_panel_kb()
+        )
+    except Exception as exc:  # noqa: BLE001
+        await message.answer(
+            f"❌ ارسال پیام ناموفق بود (کاربر ربات را استارت نکرده یا مسدود کرده):\n"
+            f"<code>{escape(str(exc))}</code>",
+            reply_markup=back_to_panel_kb(),
+        )
 
 
 # ====================================================================== #
@@ -635,6 +730,93 @@ async def reject_request(call: CallbackQuery, db: Database) -> None:
 async def adm_users(call: CallbackQuery) -> None:
     await call.answer()
     await call.message.answer("👤 مدیریت کاربران/نقش‌ها:", reply_markup=users_menu())
+
+
+# ---------------------------------------------------------------------- #
+#  مدیریت ادمین‌ها (افزودن/حذف با آیدی عددی)
+# ---------------------------------------------------------------------- #
+def _admins_text(db: Database, cfg: Settings) -> str:
+    extra = db.list_extra_admins()
+    lines = [
+        "👑 <b>مدیریت ادمین‌ها</b>",
+        "",
+        f"• ادمین اصلی: <code>{cfg.admin_id}</code> (غیرقابل حذف)",
+    ]
+    if extra:
+        lines.append("• ادمین‌های اضافه:")
+        lines += [f"   – <code>{a}</code>" for a in extra]
+    else:
+        lines.append("• ادمین اضافه‌ای ثبت نشده است.")
+    lines.append("\nبرای ادمین‌کردن یک نفر، «افزودن ادمین با آیدی» را بزنید و آیدی عددی‌اش را بفرستید.")
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "adm:admins")
+async def adm_admins(call: CallbackQuery, db: Database, cfg: Settings) -> None:
+    await call.answer()
+    await call.message.answer(
+        _admins_text(db, cfg),
+        reply_markup=admins_menu(db.list_extra_admins(), main_admin_id=cfg.admin_id),
+    )
+
+
+@router.callback_query(F.data == "adm:addadmin")
+async def adm_addadmin(call: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminDMStates.add_admin_id)
+    await call.answer()
+    await call.message.answer(
+        "👑 آیدی عددی کاربری که می‌خواهید ادمین شود را بفرستید:\n(برای لغو /start بزنید)"
+    )
+
+
+@router.message(AdminDMStates.add_admin_id)
+async def adm_addadmin_id(message: Message, state: FSMContext, db: Database, cfg: Settings) -> None:
+    text = (message.text or "").strip()
+    if not text.isdigit():
+        await message.answer("⛔️ آیدی باید عددی باشد. دوباره بفرستید یا /start بزنید.")
+        return
+    await state.clear()
+    tg_id = int(text)
+    if _is_admin_user(db, cfg, tg_id):
+        await message.answer(
+            f"ℹ️ کاربر <code>{tg_id}</code> از قبل ادمین است.",
+            reply_markup=admins_menu(db.list_extra_admins(), main_admin_id=cfg.admin_id),
+        )
+        return
+    db.add_extra_admin(tg_id)
+    db.audit("admin_add", actor=str(message.from_user.id), detail=str(tg_id))
+    await message.answer(
+        f"✅ کاربر <code>{tg_id}</code> ادمین شد.",
+        reply_markup=admins_menu(db.list_extra_admins(), main_admin_id=cfg.admin_id),
+    )
+    try:
+        await message.bot.send_message(
+            tg_id, "👑 شما به‌عنوان ادمین ربات تعیین شدید. برای دیدن پنل /start را بزنید."
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+@router.callback_query(F.data.startswith("adm:rmadmin:"))
+async def adm_rmadmin(call: CallbackQuery, db: Database, cfg: Settings) -> None:
+    parts = call.data.split(":")
+    if len(parts) != 3 or not parts[2].lstrip("-").isdigit():
+        await call.answer("نامعتبر", show_alert=True)
+        return
+    tg_id = int(parts[2])
+    if int(tg_id) == int(cfg.admin_id):
+        await call.answer("⛔️ ادمین اصلی قابل حذف نیست.", show_alert=True)
+        return
+    removed = db.remove_extra_admin(tg_id)
+    db.audit("admin_remove", actor=str(call.from_user.id), detail=str(tg_id))
+    await call.answer("✅ حذف شد." if removed else "این کاربر ادمین نبود.", show_alert=True)
+    try:
+        await call.message.edit_text(
+            _admins_text(db, cfg),
+            reply_markup=admins_menu(db.list_extra_admins(), main_admin_id=cfg.admin_id),
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @router.callback_query(F.data == "usr:list_res")
